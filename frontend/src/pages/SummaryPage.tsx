@@ -62,6 +62,7 @@ export function SummaryPage() {
         </button>
       </div>
 
+      {loading && <p className="loading-text">Generating summary… this can take a couple of minutes.</p>}
       {error && <p className="error-text">{error}</p>}
 
       {summary && (

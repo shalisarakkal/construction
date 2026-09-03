@@ -83,6 +83,7 @@ describe("SummaryPage", () => {
 
     expect(select).toBeDisabled();
     expect(screen.getByRole("button", { name: "Generating…" })).toBeDisabled();
+    expect(screen.getByText(/generating summary/i)).toBeInTheDocument();
   });
 
   it("shows an error message when summary generation fails", async () => {
