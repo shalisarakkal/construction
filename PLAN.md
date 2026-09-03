@@ -33,10 +33,6 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 - [x] Q&A page (question box, answer card, citations, chunk previews + modal)
 - [x] Summary page (document picker, generate summary, truncation notice, download `.txt`)
 - [x] Document versioning UI (Replace action, superseded badge, show-all-versions toggle)
-- [ ] Click-to-browse file picker bug — drag-and-drop works; clicking the dropzone to open the OS
-      file dialog does not for at least one user/browser setup. Root cause not confirmed
-      (suspected browser extension or dialog opening behind the window). Drag-and-drop is a fully
-      working alternative in the meantime. See `docs/AllDevFlow.md`.
 - [ ] Visual/design QA pass (layout, responsiveness, dark mode) — functionality is verified,
       appearance has not been formally reviewed
 
@@ -69,6 +65,9 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 - [x] Fixed corpus drift — deleted the duplicate `njac_5_23.pdf` (combined UCC doc, 1141 chunks)
       from the live dev corpus, restoring it to the documented 17-document/1463-chunk baseline
       (see `docs/AllDevFlow.md` Phase 2 close-out)
+- [x] Configurable default Top-K (`frontend/.env`, `VITE_DEFAULT_TOP_K`) — was hardcoded to 5 in
+      `QuestionBox.tsx`; now 3 by default, since a higher top-k means a longer prompt and CPU-backed
+      Ollama queries could take several minutes
 - [x] Eval-set runner (`backend/tests/test_eval_set.py`) — wires up the previously-unused
       `NJ/eval/eval_set.json` (15 hand-verified Q&A cases against `njac_5_23_12.pdf`) as a real,
       CI-running retrieval-quality regression check. Ingests just that one document into an
@@ -97,8 +96,5 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 - [ ] Amendment-history text isn't indexed (see eval-set finding above) — would need `njac.py` to
       stop discarding the `History:` block, store it as separate low-priority chunks or metadata
       instead of dropping it entirely
-- [ ] Click-to-browse file picker bug (see Phase 4)
-- [ ] Default Top-K=5 on the Q&A page makes CPU-backed Ollama queries slow (3-4 min at large
-      top-k); consider lowering the default or showing an elapsed-time indicator
 - [ ] This dev machine's GPU (GTX 1060 3GB) can't meaningfully accelerate the 8B Ollama model —
       CPU-only (`RAG_OLLAMA_NUM_GPU=0`) is currently faster than automatic partial GPU offload

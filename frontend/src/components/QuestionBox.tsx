@@ -5,9 +5,15 @@ interface Props {
   disabled: boolean;
 }
 
+// Configurable via frontend/.env (VITE_DEFAULT_TOP_K) since a higher top-k
+// means a longer prompt, which on CPU-backed local LLM inference (see
+// docs/AllDevFlow.md's Ollama section) can push a query well past a minute.
+const parsedDefaultTopK = Number(import.meta.env.VITE_DEFAULT_TOP_K);
+const DEFAULT_TOP_K = Number.isInteger(parsedDefaultTopK) && parsedDefaultTopK > 0 ? parsedDefaultTopK : 5;
+
 export function QuestionBox({ onAsk, disabled }: Props) {
   const [question, setQuestion] = useState("");
-  const [topK, setTopK] = useState(5);
+  const [topK, setTopK] = useState(DEFAULT_TOP_K);
 
   function submit() {
     const q = question.trim();
