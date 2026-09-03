@@ -1,0 +1,641 @@
+# AllDevFlow — Construction RAG App: Development Log & Architecture Reference
+
+This is the single running record of what this project is, why it's built the way it is, and
+what's been done so far. It's meant to be read start-to-finish by someone (including a future
+instance of Claude) picking this project up cold. Update it as work progresses — don't let it
+drift out of sync with the code.
+
+Original scope came from `dream.md` (project root): a RAG application over engineering/
+construction documents — upload, chunk, embed, retrieve, answer with citations, via a React UI.
+This log tracks how that plan evolved as it met real documents and real constraints.
+
+---
+
+## Status at a glance
+
+| Phase (per dream.md) | Status |
+|---|---|
+| Phase 0 — Source docs + chunking strategy sketch | ✅ Done |
+| Phase 1 — Core backend (FastAPI, PDF parsing, chunking, embeddings, FAISS, `/query`) | ✅ Done |
+| Phase 2 — OCR + CAD/GIS support | ✅ Done |
+| Phase 3 — Citations + confidence refinement | Not started |
+| Phase 4 — React UI | 🔨 In progress |
+| Phase 5 — Scaling + cloud | Not started |
+
+---
+
+## Phase 0 — Source documents & chunking strategy (done)
+
+### What exists
+
+- `NJ/links.md` — all links scraped from the NJ DCA "Codes & Regs" page
+  (nj.gov/dca/codes/codreg/current.shtml).
+- `NJ/pdfs/` — NJ regulation PDFs (public government publications, legally redistributable).
+  7 downloaded directly; the remaining individual NJAC subchapter files were manually added
+  later. 18 files total on disk as of Phase 1 completion — see "Final ingestion results" below
+  for which ones are actually indexed.
+- **Deliberately NOT downloaded**: IBC/IRC/IECC/IMC/IFGC (ICC), the base NEC (NFPA), the
+  National Standard Plumbing Code (IAPMO), ASHRAE 90.1. NJ adopts these *by reference* but they
+  are copyrighted publications distributed through the standards bodies' own licensed platforms,
+  not NJ-hosted files. If/when the app needs their actual text, that requires a licensed
+  subscription/export from the publisher — not scraping.
+- `NJ/eval/chunking_strategy.md` — the chunking design, written after reading the actual
+  `njac_5_23_12.pdf` structure rather than guessing.
+- `NJ/eval/eval_set.json` — 15 hand-verified Q&A cases (incl. 2 negative controls) against
+  `njac_5_23_12.pdf`, used to sanity-check retrieval + generation quality.
+- `NJ/eval/chunk_prototype.py` — throwaway prototype chunker (superseded by
+  `backend/app/chunkers/njac.py`, see below).
+
+### Key discovery that shaped everything downstream
+
+NJAC regulation PDFs are **not prose documents**. Reading the real file (not guessing) showed:
+- Every section (`§ 5:23-12.X <Title>`) is a clean, pre-structured unit: lettered subsections
+  `(a)(b)(c)`, nested numbers `1. 2. 3.`, nested romanettes `i. ii. iii.`.
+- Every section ends with a long `HISTORY:` amendment log + `Annotations/Notes` boilerplate +
+  copyright footer — low retrieval signal, but sometimes the actual answer to "when was this
+  amended."
+- §12.6 has real fee tables that a naive sentence-chunker would flatten into unreadable text.
+- **The header/breadcrumb/citation block repeats on every PDF page**, not just the first page of
+  a section. Splitting on `§ 5:23-12.X` headings alone fragments one section into N pieces (one
+  per page it spans). The only marker that appears exactly once per true section is
+  `End of Document`. This bug was caught by actually running the prototype against the real file
+  and eyeballing output — see the "Bug found & fixed" note in `NJ/eval/chunk_prototype.py`'s
+  docstring for the full story. **Lesson for future ingestion work on any new document source**:
+  always dry-run the chunker against one real file and inspect actual chunk boundaries before
+  trusting a structural assumption.
+
+This is why the chunking strategy is **structure-aware and document-type-specific**, not the
+generic 200-500-word sentence chunker originally sketched in `dream.md` section 2. See
+`NJ/eval/chunking_strategy.md` for the full rationale.
+
+---
+
+## Phase 1 — Core backend
+
+### Scope actually built (vs. dream.md's original Phase 1 list)
+
+dream.md listed: FastAPI setup, PDF parsing, chunking, embeddings, FAISS index, basic `/query`
+endpoint. Built as:
+
+- `POST /upload` — accepts a PDF, extracts text, chunks it, embeds chunks, stores vectors +
+  metadata. Runs **synchronously** in the request handler (see Known Limitations below).
+- `GET /documents` — lists ingested documents with chunk counts.
+- `GET /documents/{doc_id}/chunks` — returns all chunks for a document (added beyond the
+  original spec — directly supports the "chunk preview" UI requirement from dream.md section 6.2
+  and made debugging the chunker enormously easier during development).
+- `POST /query` — embeds the question, does FAISS top-k similarity search, returns matched
+  chunks with citations and a similarity-based confidence score. **Optionally** synthesizes an
+  LLM answer if `RAG_ANTHROPIC_API_KEY` is configured (see "LLM generation" below) — otherwise
+  returns the raw retrieved passages so the retrieval path is fully testable without any paid API
+  dependency.
+
+### Architecture decisions & why
+
+**Pluggable chunker registry, not one universal chunker.** `backend/app/ingestion.py` sniffs the
+extracted text (`looks_like_njac()`) and routes to `backend/app/chunkers/njac.py` (structure-aware,
+ported from the validated Phase-0 prototype, with the numbered-item recursive split added — see
+"Gap closed" below) or `backend/app/chunkers/generic.py` (sentence-based ~300-400 word grouping,
+the original dream.md-style fallback for non-NJAC engineering docs). This mirrors how real
+ingestion pipelines work — format/content detection routes to a specialized parser, with a
+generic fallback — and keeps the door open to add more specialized chunkers (e.g. a table-heavy
+spec-sheet chunker) later without touching the generic path.
+
+**Gap closed from Phase 0**: the throwaway prototype only implemented 2 of the 3 planned
+recursion levels (whole-section, then lettered-subsection). `§12.3(a)` in the real document is
+732 words with no further lettered subsections to split on — just numbered items. The production
+chunker (`backend/app/chunkers/njac.py`) adds the third level: when a lettered subsection is
+still oversized, it splits on numbered items `1. 2. 3.`, grouping consecutive short items
+together (up to the word cap) rather than exploding into one chunk per item.
+
+**Local embeddings (sentence-transformers `all-MiniLM-L6-v2`), not an OpenAI API.** Per the
+privacy/cost tradeoff flagged during initial planning review: no API key required, works offline
+after the first model download, zero marginal cost per document. The NJ regulation PDFs used for
+Phase-1 testing are public, but later phases may ingest proprietary engineering notes, and
+defaulting to local keeps that decision from being made by default/accident. Swappable later:
+`backend/app/embeddings.py` is the only module that would need to change (`embed_texts` /
+`embed_query` are the entire interface other modules depend on).
+
+**FAISS (`IndexFlatIP` on normalized vectors = cosine similarity) + SQLite for metadata.**
+Matches dream.md section 3.2 exactly. FAISS row ids are assigned sequentially as vectors are
+added; SQLite's `chunks.faiss_row_id` column maps a search hit back to full chunk metadata
+(citation, section title, source text, cross-references). See `backend/app/vector_store.py`.
+
+**Citations are derived programmatically, not trusted from LLM output.** `/query` builds the
+`citations` list directly from which chunks were actually retrieved (doc title + citation/page),
+independent of whatever the LLM says. This was a specific concern raised during Phase-0 planning
+review: LLM self-rated confidence/citation formatting is unreliable. Confidence score is the
+top-1 cosine similarity from FAISS, not an LLM self-rating — same reasoning.
+
+**LLM generation is optional and gracefully absent, not a hard dependency.** `backend/app/llm.py`
+only calls the Anthropic API if `RAG_ANTHROPIC_API_KEY` is set (`.env`, see `.env.example`).
+Without a key, `/query` still returns ranked chunks + programmatic citations + confidence —
+useful and testable on its own. `answer` is `null` and `llm_used: false` in that case, so the API
+consumer can tell the difference between "no answer" and "answer not attempted."
+
+### Setup & running
+
+```powershell
+# one-time setup (already done in this environment)
+python -m venv backend\.venv
+backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+
+# run the API
+backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --reload
+
+# optional: enable LLM answer synthesis
+copy backend\.env.example backend\.env
+# then edit backend\.env and set RAG_ANTHROPIC_API_KEY
+```
+
+API docs available at `http://127.0.0.1:8000/docs` (FastAPI auto-generated) once running.
+
+### Verification performed
+
+Ran the full loop end-to-end against the real `njac_5_23_12.pdf` (not a synthetic test file):
+
+1. **Chunking, isolated** — `backend/tests/test_chunking.py` runs the chunker directly (no
+   FastAPI/embeddings/FAISS needed). Confirmed 35 chunks produced, chunker auto-selected `njac`,
+   and **zero chunks exceed the 500-word cap** — the level-3 recursive split (added to close the
+   Phase-0 prototype gap) correctly breaks up `§12.3(a)` into 3 sub-chunks instead of leaving one
+   732-word chunk.
+2. **Full pipeline via API** — started uvicorn, `POST /upload` with `njac_5_23_12.pdf`:
+   `{"chunker_used":"njac","chunk_count":35}`, matching the isolated test exactly.
+   `GET /documents/{doc_id}/chunks` returns all 35 chunks with correct citations/text.
+3. **Retrieval quality**, using cases from `NJ/eval/eval_set.json` against the live `/query`
+   endpoint (no LLM key configured, so this tests retrieval + confidence scoring specifically):
+
+   | Question | Top retrieved citation | Expected | Confidence |
+   |---|---|---|---|
+   | Initial registration fee for an elevator device | `N.J.A.C. 5:23-12.5` | `5:23-12.5` ✅ | 0.82 |
+   | Days a building can be open to qualify as a seasonal facility | `N.J.A.C. 5:23-12.10` | `5:23-12.10` ✅ | 0.67 |
+   | Minimum accessible parking space width (negative control — not in this doc; it's in the barrier-free subcode, 5:23-7, not indexed) | `N.J.A.C. 5:23-12.12` (wrong, as expected) | N/A | **0.34** |
+
+   The negative-control result is the interesting one: confidence for an out-of-scope question
+   (0.34) is roughly half that of the two genuinely answerable questions (0.82, 0.67). This is a
+   real, measured signal — not a guess — that a confidence threshold (e.g. "don't answer below
+   ~0.4-0.5") is a viable, cheap way to catch out-of-scope questions before Phase 3's fuller
+   confidence-scoring work, and it doesn't depend on an LLM self-rating anything.
+4. **LLM synthesis path** — not exercised yet (no `RAG_ANTHROPIC_API_KEY` configured in this
+   environment). Code path exists (`backend/app/llm.py`) and `llm_used: false` / `answer: null`
+   was confirmed to come back correctly when unconfigured, rather than erroring.
+
+**Generic chunker path** — later exercised for real against `52_27D_119.pdf` (the UCC Act itself,
+318 chunks) and `nec_2023_tia_1_13.pdf` (27 chunks), both non-NJAC-structured documents that
+correctly fell through to `generic_chunk()`. Confirmed working; not deeply inspected for chunk
+quality beyond word-count bounds.
+
+### Bug found during full-corpus ingestion: chunk_id collisions
+
+Uploading the full `njac_5_23.pdf` (all 12 subchapters combined, 1088 chunks) plus several other
+files hit `sqlite3.IntegrityError: UNIQUE constraint failed: chunks.chunk_id`. Root cause: chunk
+IDs in `njac.py` are derived from citation text (e.g. `..._(a).1+`), and on a large enough
+document, nested numbered lists within the same lettered subsection can restart at "1." (a
+sub-list inside item 3 also starting at 1), producing two different numbered-item groups that
+both resolve to the same citation string. SQLite correctly caught this rather than silently
+overwriting a chunk.
+
+**Fix**: added `_dedupe_chunk_ids()` to `backend/app/chunkers/njac.py` — a post-processing pass
+that appends `#2`, `#3`, etc. to any chunk_id collision, guaranteeing uniqueness by construction
+instead of trusting citation text to never repeat. Because the failed uploads had already written
+vectors into the FAISS index before their SQLite transaction rolled back (FAISS writes aren't
+transactional the way SQLite is), fixing this required a full reset (`rm -rf backend/storage/`)
+and re-ingesting everything from scratch rather than patching in place. Verified: `njac_5_23.pdf`
+re-ingests cleanly at 1088 chunks, no collisions.
+
+### Decision: exclude the full combined UCC document from the index
+
+Once individual NJAC subchapter files (`njac_5_23_1.pdf` ... `njac_5_23_12.pdf`) were added to
+`NJ/pdfs/` alongside the full `njac_5_23.pdf`, the same content would be indexed twice — once as
+part of the 1088-chunk combined document, once again per-subchapter. Rather than assume which was
+preferred, this was raised explicitly; decision: **index only the individual subchapter files,
+exclude `njac_5_23.pdf`**. Per-subchapter files give cleaner, more specific citations (a query
+about elevators cites `njac_5_23_12.pdf` directly rather than a combined document spanning all 12
+subchapters) with no duplicate content. Required another full reset + re-ingest cycle to remove
+the combined document's 1088 chunks and replace them with the per-subchapter equivalents.
+
+### Final ingestion results (Phase 1 close-out)
+
+**Superseded by Phase 2** — the 4 "needs OCR" entries below turned out to be misdiagnosed (see
+Phase 2's "The bigger discovery" section); 3 of them just needed a chunker regex fix, not OCR, and
+the 4th is a legitimately-empty reserved subchapter. Current state is 17/18 indexed (see Phase 2's
+verification section for the up-to-date table). Left as-is below for the historical record of what
+Phase 1 actually shipped with.
+
+Of 18 PDFs present in `NJ/pdfs/`, **13 are indexed**, 1 is deliberately excluded, and 4 cannot be
+processed yet:
+
+| File | Result | Chunks |
+|---|---|---|
+| njac_5_23_1.pdf | ✅ njac | 12 |
+| njac_5_23_2.pdf | ✅ njac | 129 |
+| njac_5_23_3.pdf | ✅ njac | 128 |
+| njac_5_23_4.pdf | ✅ njac | 133 |
+| njac_5_23_5.pdf | ✅ njac | 85 |
+| njac_5_23_6.pdf | ✅ njac | 406 |
+| njac_5_23_7.pdf | ✅ njac | 36 |
+| njac_5_23_8.pdf | ✅ njac | 87 |
+| njac_5_23_9.pdf | ✅ njac | 20 |
+| njac_5_23_11.pdf | ✅ njac | 8 |
+| njac_5_23_12.pdf | ✅ njac | 35 |
+| 52_27D_119.pdf | ✅ generic | 318 |
+| nec_2023_tia_1_13.pdf | ✅ generic | 27 |
+| **Total indexed** | | **1424** |
+| njac_5_23.pdf | ⛔ excluded (duplicate content, see decision above) | — |
+| njac_5_23_3A.pdf | ❌ no extractable text (scanned image, needs OCR) | — |
+| njac_5_23_4A.pdf | ❌ no extractable text (scanned image, needs OCR) | — |
+| njac_5_23_4B_C.pdf | ❌ no extractable text (scanned image, needs OCR) | — |
+| njac_5_23_4D.pdf | ❌ no extractable text (scanned image, needs OCR) | — |
+
+The 4 OCR failures are handled cleanly (`ingestion.py` raises a clear 4xx-style error —
+`"No extractable text found in PDF (may need OCR — not implemented in Phase 1)"` — rather than
+crashing or silently indexing nothing). Decision: leave these for Phase 2 rather than rush an OCR
+fallback into Phase 1; will be revisited as part of the planned OCR work below.
+
+Note: subchapter 10 (`njac_5_23_10.pdf`) is not present in `NJ/pdfs/` at all. Most individual
+subchapter files (1, 2, 4, 5, 8, 9, 11) were manually copied in by the user rather than scraped
+via `NJ/links.md`, so this isn't confirmed as "doesn't exist on the source site" — just not yet
+obtained. Worth checking https://www.nj.gov/dca/codes/codreg/current.shtml directly if subchapter
+10 content is needed later.
+
+### Known limitations / backlog (carried from Phase-0 planning review + new ones found while building)
+
+- **Synchronous `/upload`.** PDF parsing + embedding can take seconds; a production version
+  should push this to a background job (Celery/RQ) with a status-polling endpoint, matching the
+  "show processing stages" UI requirement in dream.md section 6.1.A. Deferred because Phase 1's
+  goal was a working core loop, not production hardening.
+  <!-- todo -->
+- **No document versioning.** Re-uploading a revised PDF creates a new `doc_id` with its own
+  chunks; old chunks aren't superseded. Construction docs get revised via addenda constantly —
+  this needs a real decision (replace-on-reupload vs. version-tag + "latest" filter) before
+  Phase 2.
+  <!-- todo -->
+- **No eval automation yet.** `NJ/eval/eval_set.json` exists but nothing runs it against the
+  live `/query` endpoint automatically. Worth a small script before iterating further on
+  chunking/retrieval quality, so regressions are caught rather than eyeballed.
+  <!-- todo -->
+- **Generic chunker's sentence splitter is regex-based, not NLTK/spaCy.** Chosen to avoid a
+  runtime model-download dependency for Phase 1. Fine for straightforward paragraph prose; revisit
+  if real engineering-note documents (Phase 2 CAD/GIS exports) show poor sentence boundaries.
+- **No OCR path yet.** dream.md Phase 2 scope (Tesseract/Azure Vision for scanned drawings) not
+  started. Flagged in original planning review as a real risk area (technical drawings/dimension
+  callouts) — worth testing against real scanned samples early in Phase 2, not assumed to "just
+  work." Now backed by 4 concrete real-world failing samples (`njac_5_23_3A.pdf`, `4A.pdf`,
+  `4B_C.pdf`, `4D.pdf` — see "Final ingestion results" above); explicitly deferred to Phase 2
+  rather than rushed into Phase 1. Use these same 4 files as the first OCR test set when Phase 2
+  starts.
+- **No auth, no multi-user, no rate limiting.** Explicitly out of scope until Phase 5 per
+  dream.md's own timeline; noted here so it isn't mistaken for an oversight.
+
+### Dev-environment note (not app scope, but worth recording)
+
+Shell working directory persists across tool calls within a session. An early command
+(`cd NJ/pdfs && ...` to download PDFs) left the shell's cwd inside `NJ/pdfs/` for later commands
+that used relative paths (e.g. `mkdir -p docs backend/...`), creating stray empty directory trees
+nested under `NJ/pdfs/`. No data was lost (every actual file write used an absolute path via the
+Write tool, unaffected by shell cwd), but it's a reminder to always use absolute paths or an
+explicit `cd` at the start of each shell command rather than relying on cwd state.
+
+---
+
+## Phase 2 — OCR + CAD/GIS support
+
+### Scope built (vs. dream.md section 1.2/1.3 + timeline "Week 3")
+
+dream.md listed: Tesseract/Azure Vision OCR for scanned images, DOCX/TXT support. Built:
+
+- **DOCX/TXT ingestion** — `app/extractors.py` gained `extract_docx_pages()` (python-docx,
+  whole document as a single "page" since python-docx has no reliable page-break API) and
+  `extract_txt_pages()` (plain read). `ingestion.py` was generalized from `ingest_pdf()` to
+  `ingest_document()`, dispatching on file extension (`SUPPORTED_EXTENSIONS = {.pdf, .docx, .txt}`
+  in `extractors.py`). `upload.py` validates against that set instead of a hardcoded `.pdf` check.
+- **OCR fallback for scanned PDFs** — `app/ocr.py`, using Tesseract (via `pytesseract`) for OCR
+  and PyMuPDF (`fitz`) for page rasterization (pure pip wheel, no separate system dependency for
+  rendering — only the Tesseract engine itself needs a system install). `extract_pdf_pages()` in
+  `extractors.py` runs pdfplumber first as before, then OCRs only the specific pages that came
+  back near-empty (`ocr.page_needs_ocr()`, threshold 20 chars) rather than every page of every
+  PDF — a document that's 99% real text with one scanned page only pays OCR cost for that page.
+  Tesseract chosen over a cloud OCR API for the same local-first/no-per-call-cost reasoning as the
+  Phase 1 embeddings choice.
+- Tesseract is a system binary, not pip-installable. `ocr.is_available()` checks for it at ingest
+  time; if a page needs OCR and Tesseract isn't installed, the upload fails with a specific,
+  actionable 422 (not a silent skip) — see "Known limitation" below, since this is the actual
+  current state of this dev machine.
+
+### The bigger discovery: the "needs OCR" diagnosis from Phase 1 was wrong
+
+Phase 1 flagged 4 files (`njac_5_23_3A.pdf`, `4A.pdf`, `4B_C.pdf`, `4D.pdf`) as scanned/
+image-only PDFs needing OCR, based solely on the generic error message
+`"No extractable text found in PDF"`. Investigating properly before installing Tesseract (rather
+than assuming the Phase 1 diagnosis was correct) found the real cause: **these files have
+perfectly good extractable text** — `pdfplumber` pulled 766–38,955 characters per file, none of
+it image-derived. The actual bug was in `njac_chunk()`'s section-heading regex:
+
+```
+SECTION_HEADING_RE = re.compile(r"^§\s*(5:23-\d+(?:\.\d+)?)\s+(.+)$", ...)
+```
+
+This only matches purely-numeric subchapter numbers (`5:23-12`). All 4 "failing" files have
+**letter-suffixed subchapter numbers** — `5:23-3A`, `5:23-4A`, `5:23-4B`/`4C`, `5:23-4D` — so
+`\d+` alone stopped matching partway through (e.g. "3A" → `\d+` consumes "3", then needs `\s+`
+but the next character is "A", so the whole line fails to match). Zero section matches → zero
+chunks → `ingest_pdf`'s generic `"No extractable text found"` fallback fired, which was
+technically true (zero *chunks*) but a misleading description of *why*.
+
+**Fix**: `SUBCHAPTER_NUM_RE = r"5:23-\d+[A-Za-z]?(?:\.\d+)?"`, shared by `SECTION_HEADING_RE` and
+`CROSSREF_RE` (which had the identical limitation for cross-reference extraction). Verified against
+all 4 files directly (`SECTION_HEADING_RE.findall()` + `njac_chunk()` output) before touching the
+running app:
+
+| File | Before fix | After fix |
+|---|---|---|
+| njac_5_23_3A.pdf | 0 chunks | 2 chunks |
+| njac_5_23_4A.pdf | 0 chunks | 27 chunks |
+| njac_5_23_4D.pdf | 0 chunks | 9 chunks |
+| njac_5_23_4B_C.pdf | 0 chunks | 0 chunks (see below — this one's different) |
+
+`njac_5_23_4B_C.pdf` turned out to be a **genuinely reserved placeholder subchapter** — its only
+content is "SUBCHAPTERS 4B AND 4C. (RESERVED)", no per-section heading at all, so no regex fix
+could produce section chunks from it (there's nothing there to chunk). Rather than error on a
+document that plainly has real, extractable, meaningful text (5 short lines saying "this is
+reserved"), `ingestion.py` now falls back to the `generic` chunker whenever `njac_chunk()` returns
+zero chunks despite `looks_like_njac()` matching — producing 1 chunk of that reserved-notice text,
+which is arguably the *correct* answer to "what's in subchapter 4B?" (answer: nothing, it's
+reserved) rather than a hard failure.
+
+**Net effect: none of these 4 files needed OCR at all.** OCR support was still built (see above)
+because it's real, useful Phase 2 scope for genuinely scanned documents in the future — but it
+turned out to be solving a problem these specific 4 files didn't actually have. Lesson: an error
+message like "no extractable text" describes a downstream *symptom* (zero chunks), not
+necessarily the actual cause (could be zero raw text, or a chunker regex not matching real text) —
+worth checking `pdfplumber` output directly before assuming which one it is.
+
+### Verification performed
+
+- Confirmed all 4 files produce correct chunks via direct chunker-module testing (bypassing the
+  API) before touching the running app — see table above.
+- Full clean re-ingest of all 17 non-full-UCC source files (same set as Phase 1's final ingestion,
+  now including the 4 previously-failing ones) via the live `/upload` API:
+  **17/17 documents succeeded, 1463 total chunks** (up from 13/17, 1424 chunks, in Phase 1).
+  `njac_5_23_3A.pdf` → 2 chunks (njac), `4A.pdf` → 27 chunks (njac), `4B_C.pdf` → 1 chunk
+  (generic fallback), `4D.pdf` → 9 chunks (njac).
+- Retrieval-quality spot check against the newly-ingested 3A content via `/query`: a targeted
+  question ("What is designated as the amusement ride subcode...") correctly surfaced
+  `njac_5_23_3A.pdf — N.J.A.C. 5:23-3A.2` as the top citation (confidence 0.66). A vaguer phrasing
+  of the same question ranked two `njac_5_23_3.pdf` chunks higher instead — expected embedding
+  behavior given there are only 2 chunks about this narrow topic among 1463 total, not a chunking
+  bug (confirmed by reading `njac_5_23_3A.pdf`'s chunks directly via
+  `/documents/{doc_id}/chunks` — both chunks are clean and correctly citation-tagged).
+- DOCX and TXT ingestion tested with small generated sample files (not real construction
+  documents — none were on hand) via `/upload`: both correctly routed to the `generic` chunker
+  and produced 1 chunk each.
+- **OCR fallback verified end-to-end** after the user installed Tesseract (UB-Mannheim build,
+  v5.5.3) manually per the plan above. Two gotchas found and fixed while verifying:
+  1. `pytesseract` looks for `tesseract` on `PATH`, but a Windows installer updates the
+     system/user `PATH` registry keys, which a shell (or backend process) already running when
+     the installer runs won't see until a fresh login/session. `ocr.is_available()` now checks
+     `shutil.which("tesseract")` first and falls back to the known UB-Mannheim default install
+     path (`C:\Program Files\Tesseract-OCR\tesseract.exe`) if that's where the binary actually is
+     — avoids requiring a machine restart or new terminal just to pick up the PATH change.
+  2. No real scanned document exists in the current corpus (that was the whole point of the
+     misdiagnosis correction above), so a synthetic image-only PDF was generated on the fly
+     (Pillow, text drawn onto a blank image, saved as a PDF with no text layer) specifically to
+     exercise the OCR path. Verified via `extractors.extract_pdf_pages()` directly
+     (`ocr_status: "used"`, recovered text accurate aside from one letter-casing OCR artifact) and
+     via a real `POST /upload` call (`"ocr_used": true` in the response). Test file deleted
+     afterward and the index cleaned via another full wipe + re-ingest (17 real files, no synthetic
+     test doc left behind).
+- **DOCX/TXT tested only with tiny synthetic samples**, not real construction documents. No real
+  DOCX/TXT engineering files were available in this project yet.
+  <!-- todo -->
+- **DOCX has no page-number metadata** (python-docx has no reliable page-break API) — the generic
+  chunker's `page_number` field will be `None` for all DOCX-derived chunks, same as it already is
+  for `njac_section`-type chunks. Acceptable for now (addenda/notes, not the huge regulation PDFs
+  where page numbers matter more), but worth revisiting if DOCX becomes a primary source type.
+- **CAD/GIS support** — dream.md's phrasing ("Treat exported PDF/TXT/DOCX as standard documents")
+  is already satisfied by the 3 formats above; no CAD/GIS-specific parsing (e.g. DWG/DXF/shapefile)
+  was in scope for dream.md itself, so none was built. Flagging here only so it isn't mistaken for
+  an oversight if CAD-native files come up later.
+
+### Duplicate-upload detection
+
+Not in dream.md, but a real gap noticed during Phase 4 UI testing: uploading the same PDF twice
+(confirmed via the user's own drag-and-drop testing, which produced two `njac_5_23_2.pdf` entries
+in the document list) silently created two fully-duplicated documents with no warning. Added:
+
+- `documents.content_hash` column (SQLite, indexed) — SHA-256 of the raw uploaded bytes.
+- `vector_store.find_document_by_hash()` — checked in `ingestion.ingest_document()` **before**
+  any file I/O, chunking, or embedding happens, so a duplicate is rejected cheaply, not after doing
+  the (wasted) work.
+- `DuplicateDocumentError` (a `ValueError` subclass carrying the existing doc's info) → `upload.py`
+  returns **409 Conflict** with a message naming the existing `doc_id`/title, distinct from the
+  existing 422 (unprocessable file) and 400 (unsupported type) cases. No frontend changes needed —
+  `UploadComponent`'s error handling is already generic over any non-2xx status.
+- Hash is of file **content**, not filename — catches the same file re-uploaded under a different
+  name, and correctly does *not* flag two different files that happen to share a name.
+- This required a schema change (`content_hash NOT NULL`), so — same pattern as every other schema
+  change in this project — required a full `rm -rf backend/storage/` + re-ingest rather than a
+  migration, since there's no migration tooling yet (noted as a gap, not fixed here).
+
+**Verified**: uploaded `njac_5_23_11.pdf`, then uploaded the identical file again — first call
+succeeded normally, second call returned `409 {"detail":"This file was already ingested as
+'njac_5_23_11.pdf' (doc_id=e433b90ced3e)"}`.
+
+**Known limitation**: this only catches byte-identical files, not semantic duplicates (e.g. the
+full `njac_5_23.pdf` vs. its individual subchapter files — different bytes, overlapping content).
+That's a much harder problem (content-level dedup) and was handled earlier via an explicit human
+decision (exclude the full document), not automatically — out of scope for this hash-based check.
+
+### Document deletion
+
+Also not in dream.md, added when the user asked how to remove an uploaded document (e.g. to clean
+up a duplicate or a test file). `DELETE /documents/{doc_id}` (`routers/documents.py`) →
+`ingestion.delete_document()` → `vector_store.delete_document()`, plus a "Delete" button per row in
+`DocumentList.tsx` (confirms via `window.confirm()` before calling the API).
+
+- **The FAISS index is deliberately left alone on delete** — only the SQLite `documents` and
+  `chunks` rows are removed, plus the raw file under `storage/documents/{doc_id}/`. `IndexFlatIP`
+  row ids are positional; compacting the index after a delete would shift every subsequent row's
+  id and silently break their `chunks.faiss_row_id` mappings. Instead, deleted chunks become
+  "orphaned" FAISS rows with no matching SQLite row — `vector_store.search()` already tolerates
+  this (skips a hit if its `faiss_row_id` doesn't resolve to a chunk), so a delete just means those
+  rows can still be found by FAISS but never surface as results.
+- **Known limitation**: the FAISS index only grows, never shrinks — deleting documents doesn't
+  reclaim index space. Acceptable at this corpus size (thousands of vectors); would need a real
+  compaction strategy (rebuild index + remap ids) if deletions become frequent at scale.
+- **Verified**: used to clean up a synthetic OCR test document mid-session — `DELETE
+  /documents/{doc_id}` returned `204`, the document disappeared from `GET /documents`, and the
+  index was confirmed back to the real 17-document/1463-chunk corpus afterward.
+- This still doesn't solve **document versioning** (re-uploading a revised file makes a new
+  `doc_id` rather than superseding the old one) — see the dedicated section below.
+
+### Document versioning
+
+Carried as a known limitation since Phase 1: re-uploading a revised document just created a second,
+unrelated `doc_id` with no link between them. Raised explicitly for a decision between two designs
+— **replace-on-reupload** (delete the old version, no history) vs. **version-tag + keep history**
+(keep every version, retrieval only searches the latest) — user chose the latter.
+
+- `documents` gained `supersedes_doc_id` (nullable, points at the version it replaces) and
+  `is_latest` (bool, default 1). `POST /upload` gained an optional `supersedes` form field naming
+  the `doc_id` to replace; `ingestion.ingest_document()` validates that doc exists and is currently
+  the latest version (a version chain is deliberately linear — you can't supersede an
+  already-superseded version, you must replace whatever is *currently* latest) before ingesting the
+  new file and flipping the old one's `is_latest` to 0. The old version's rows and FAISS vectors are
+  **not deleted** — that's what makes this "history" rather than replace-on-reupload.
+- `vector_store.search()` now skips any FAISS hit whose owning document isn't `is_latest` — same
+  join-and-skip tolerance pattern already used for orphaned rows left by a deletion, so a superseded
+  version's chunks stay in the FAISS index (harmless, same tradeoff as deletion) but never surface
+  in retrieval.
+- `GET /documents` defaults to latest-only; `?include_all=true` returns every version.
+  `GET /documents/{doc_id}/versions` walks the `supersedes_doc_id` chain in both directions and
+  returns the full history for whichever document you ask about, oldest first.
+- Frontend: `DocumentList` gained a per-row "Replace" control (a file input, same hidden-input
+  pattern as the main uploader) next to Delete, and a "Show superseded versions" checkbox that
+  toggles `include_all` and renders older versions dimmed with a "superseded" badge.
+- Required the schema change → full `rm -rf backend/storage/` + re-ingest cycle, same as every
+  other schema change in this project (still no migration tooling).
+- **Verified end-to-end**: uploaded a synthetic revised version of `njac_5_23_11.pdf` via
+  `supersedes=<old doc_id>`; confirmed the old version disappeared from the default `/documents`
+  list but still appeared under `?include_all=true` with `is_latest: false`; confirmed
+  `/documents/{doc_id}/versions` returned both in order; confirmed `/query` for content unique to
+  the new version retrieved only the new version's chunk, never the old one's. Cleaned up both test
+  versions afterward and re-ingested the real `njac_5_23_11.pdf` to restore the 17-document/
+  1463-chunk baseline.
+- **Known limitation**: deleting the current latest version of a document doesn't auto-promote its
+  predecessor back to latest — the chain just loses its head. Not handled, since it's an unusual
+  action (you'd normally replace, not delete, the latest version) — flagged here rather than
+  silently allowed to produce a confusing state.
+
+---
+
+## LLM provider switch (Anthropic / Ollama)
+
+Not tied to a specific dream.md phase. Raised as a question ("can we use something other than an
+Anthropic key?") while the `RAG_ANTHROPIC_API_KEY` requirement was still deferred; discussed
+free-tier cloud options (OpenRouter, Gemini, Groq) and a fully-local option (Ollama). Ollama was
+picked specifically to test the functionality without any API key or billing at all, and because it
+matches the same local-first reasoning already used for `embeddings.py` (see Phase 1).
+
+- `backend/app/llm.py` is the **only** module that talks to an LLM provider — `routers/query.py`
+  and `routers/summary.py` only ever call `llm.is_configured()` / `llm.synthesize_answer()` /
+  `llm.synthesize_summary()`, and don't know which provider is active. This meant adding a second
+  provider touched exactly one backend module plus `config.py`; nothing in retrieval, chunking,
+  storage, or the frontend needed to change.
+- New setting: `RAG_LLM_PROVIDER=anthropic|ollama` (default `anthropic`, unchanged behavior).
+  Ollama-specific settings: `RAG_OLLAMA_BASE_URL` (default `http://localhost:11434`),
+  `RAG_OLLAMA_MODEL` (default `llama3.1`) — no API key needed for Ollama, since it's a local server
+  process, not a cloud call.
+- Ollama calls use Python's stdlib `urllib.request` (raw HTTP POST to `/api/chat`), not a new pip
+  dependency — the request/response shape is simple enough not to need an SDK.
+- `is_configured()` now means different things per provider: for Anthropic it's still a static "is a
+  key set" check; for Ollama it's a runtime reachability check (`GET /api/tags`, 1.5s timeout) —
+  same reasoning as `ocr.is_available()` in Phase 2: a *configured* provider isn't the same as one
+  that's actually *running* right now, and Ollama is a local server that may not be up.
+- **Operational prerequisite** (not code): Ollama must be installed as a system binary and a model
+  pulled locally (e.g. `ollama pull llama3.1`) before `RAG_LLM_PROVIDER=ollama` does anything —
+  same category of external dependency as the Tesseract install in Phase 2.
+- **Switching back to Anthropic (or between the two at all) is a config-only change** —
+  `RAG_LLM_PROVIDER` + a restart, no code edit — by design, since both providers are kept behind the
+  same switch rather than one replacing the other.
+- **Verified**: backend restarted with the new code (no schema change, no re-ingest needed — this is
+  fully orthogonal to storage); confirmed `/query` still returns `llm_used: false, answer: null`
+  correctly with no provider configured (regression check against the existing no-key behavior).
+  The Ollama path itself has not been exercised end-to-end yet — that requires Ollama actually
+  installed and running locally, which hasn't happened in this environment yet.
+  <!-- todo -->
+
+---
+
+## Phase 4 — React UI
+
+### Scope actually built (vs. dream.md section 6)
+
+dream.md specified 3 pages (Upload, Q&A, Summary) and 6 components. Built as a Vite + React +
+TypeScript app under `frontend/`, no router library (only 3 pages, simple tab-switch state in
+`App.tsx` was enough — avoided pulling in react-router for something this small):
+
+- **Upload page** (`pages/UploadPage.tsx`) — `UploadComponent` (drag-and-drop + click-to-browse,
+  per-file status: Queued → Processing… → Done/Error) + `DocumentList` (table of ingested docs,
+  refetches after each successful upload).
+- **Q&A page** (`pages/QAPage.tsx`) — `QuestionBox` (textarea + top-k input) → `AnswerCard`
+  (answer text, confidence badge, LLM-used indicator) → `CitationList` → `ChunkResultList`
+  (snippet + score per retrieved chunk, "View full chunk" opens `ChunkPreviewModal` with full
+  text/metadata). `ChunkResultList` isn't in dream.md's component list (6.2) but was needed to
+  actually display "chunk previews" plural, as required by 6.1.B — `ChunkPreviewModal` alone only
+  covers the single-chunk detail view.
+- **Summary page** (`pages/SummaryPage.tsx`) — document dropdown, "Generate Summary" button,
+  summary text, "Download summary (.txt)" button (client-side Blob download, no backend
+  round-trip needed for that part).
+
+### Backend addition required: summary endpoint
+
+dream.md's Summary page ("select document → Generate Summary") had no backing endpoint — Phase 1
+only built `/upload`, `/documents`, `/documents/{doc_id}/chunks`, `/query`. Added
+`POST /documents/{doc_id}/summary` (`backend/app/routers/summary.py`) and
+`llm.synthesize_summary()` (`backend/app/llm.py`) to close that gap. Design notes:
+
+- **503 if no LLM configured**, not a silent/empty summary — matches the existing pattern of
+  `/query`'s `answer: null` when unconfigured, but summary has no non-LLM fallback (there's no
+  "raw passages" equivalent for "summarize this document"), so a clear error is the only honest
+  response.
+- **Word-budget cap (`MAX_SUMMARY_WORDS = 6000`)** on the context sent to the LLM. Some ingested
+  documents are large (`njac_5_23_6.pdf` = 406 chunks) and dumping every chunk into one LLM call
+  isn't a sane single-request budget. Chunks are included in FAISS-insertion order (roughly
+  document order) up to the cap; response reports `chunks_used`/`chunks_total`/`truncated` so the
+  UI can tell the user the summary is partial rather than silently truncating. Not yet validated
+  against a real API key — the logic is straightforward but untested end-to-end pending a
+  configured `RAG_ANTHROPIC_API_KEY`.
+
+### CORS
+
+Added `CORSMiddleware` to `backend/app/main.py` scoped to the Vite dev server origins
+(`localhost:5173` / `127.0.0.1:5173`) — needed since frontend and backend run as separate dev
+servers on different ports.
+
+### Verification performed
+
+- `npx tsc --noEmit` — clean, no type errors.
+- Backend restarted with `--reload` so future edits don't require manual restarts during Phase 4
+  iteration.
+- End-to-end upload flow verified working via direct browser automation (Chrome extension,
+  connected mid-session after an initial "not connected" failure — retried once and it worked):
+  navigated to `localhost:5173`, used the file input directly to attach `njac_5_23_11.pdf`,
+  confirmed it went through the full pipeline (`Done — 8 chunks (njac)`) and appeared in the
+  document list. This confirms `UploadComponent`'s upload logic, `DocumentList`'s refetch-on-
+  upload, and the backend `/upload` + CORS path all work correctly end-to-end.
+- Not yet visually screenshotted/reviewed page-by-page for layout/style issues — verification so
+  far is functional (does the data flow work), not a design review.
+
+### Known issue: click-to-browse doesn't open the file picker (user-reported)
+
+Drag-and-drop onto the dropzone works. Clicking the dropzone to open the OS file picker does not,
+per direct user testing in their own Chrome browser — confirmed NOT a backend/upload-logic bug
+(the upload path itself was verified working via a direct programmatic file attach, see above).
+
+Already tried: switched `UploadComponent` from a `div onClick={() => inputRef.current?.click()}`
+pattern to the more standard `<label htmlFor>` + associated `<input id>` pattern (the more robust,
+extension-resistant approach for click-to-browse), plus made the input visually-hidden via CSS
+(clip-rect technique) rather than the `hidden` attribute. Did not resolve it.
+
+Suspected causes, not yet confirmed: a browser extension (ad blocker/privacy tool) on the user's
+machine intercepting synthetic-looking clicks on file inputs, or the native OS file dialog opening
+behind the browser window rather than in front of it. Diagnostic steps handed to the user: check
+taskbar/Alt+Tab for a hidden dialog window, try Incognito mode (most extensions disabled by
+default), check DevTools console for errors on click.
+
+**Deferred to backlog** — drag-and-drop is a fully working alternative upload path in the
+meantime, so this doesn't block using the app; revisit once the user reports back with diagnostic
+results.
+<!-- todo -->
+
+### Known limitations / backlog (Phase 4)
+
+- **Summary generation untested against a real LLM call** — no `RAG_ANTHROPIC_API_KEY` configured
+  in this environment yet; the 503-when-unconfigured path is verified, the actual summarization
+  quality/prompt is not.
+  <!-- todo -->
+- **No visual/design QA pass yet** — pages render and the data flows correctly, but no one has
+  reviewed spacing, responsiveness, or dark-mode behavior in a real browser session yet.
+  <!-- todo -->
+- **Click-to-browse file picker bug** — see dedicated section above.
+  <!-- todo -->

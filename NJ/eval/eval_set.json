@@ -1,0 +1,113 @@
+{
+  "source_doc": "njac_5_23_12.pdf",
+  "doc_title": "N.J.A.C. 5:23-12 Elevator Safety Subcode",
+  "notes": "Small hand-labeled eval set sketched directly against the actual downloaded PDF text. Answers/citations were verified by reading the source. Use this to sanity-check retrieval + generation quality before scaling up: for each question, check that (1) the retrieved top-k chunks include the cited section, and (2) the generated answer matches expected_answer and cites expected_citation.",
+  "cases": [
+    {
+      "id": "q1",
+      "type": "single-fact",
+      "question": "How much is the initial registration fee for an elevator device?",
+      "expected_answer": "$76.00",
+      "expected_citation": "N.J.A.C. 5:23-12.5"
+    },
+    {
+      "id": "q2",
+      "type": "single-fact",
+      "question": "Are elevators inside single-family homes (Group R-3) required to be registered with the Department?",
+      "expected_answer": "No — elevator devices in structures of Group R-3, R-4, or R-5 are exempt from registration.",
+      "expected_citation": "N.J.A.C. 5:23-12.4(a) / 12.4(b)1"
+    },
+    {
+      "id": "q3",
+      "type": "table-lookup",
+      "question": "What is the Departmental fee for witnessing an acceptance test on a hydraulic elevator (not in a Group R-3/R-4/R-5 or exempt R-2 structure)?",
+      "expected_answer": "$302.00",
+      "expected_citation": "N.J.A.C. 5:23-12.6(a)1.ii"
+    },
+    {
+      "id": "q4",
+      "type": "table-lookup",
+      "question": "What is the one-year periodic inspection fee for a traction elevator in a building over 10 floors?",
+      "expected_answer": "$362.00",
+      "expected_citation": "N.J.A.C. 5:23-12.6(b)2.i(2)"
+    },
+    {
+      "id": "q5",
+      "type": "definitional",
+      "question": "How often must routine inspections be performed on escalators?",
+      "expected_answer": "At six-month intervals.",
+      "expected_citation": "N.J.A.C. 5:23-12.3(a)1 (see also definition in 12.1(f)1)"
+    },
+    {
+      "id": "q6",
+      "type": "procedural",
+      "question": "Under what condition can a temporary certificate of compliance be issued for an elevator device?",
+      "expected_answer": "When work required by violations is being diligently performed and the elevator subcode official finds no hazard to the public is created by continued operation; it may not be issued for longer than the inspection cycle.",
+      "expected_citation": "N.J.A.C. 5:23-12.9(b)"
+    },
+    {
+      "id": "q7",
+      "type": "procedural",
+      "question": "How many consecutive days can a building be open to the public and still qualify for 'seasonal facility' classification?",
+      "expected_answer": "Not more than 184 consecutive days open, followed by at least 181 consecutive days closed.",
+      "expected_citation": "N.J.A.C. 5:23-12.10(a)"
+    },
+    {
+      "id": "q8",
+      "type": "procedural",
+      "question": "How quickly must a construction official notify the Elevator Safety Unit about an accident involving a device under the Department's own jurisdiction?",
+      "expected_answer": "As soon as possible, and no later than the end of the next business day after the accident is reported to the construction official.",
+      "expected_citation": "N.J.A.C. 5:23-12.11(e)"
+    },
+    {
+      "id": "q9",
+      "type": "multi-hop",
+      "question": "If an elevator accident causes damage that affects the device's future safe operation, can the elevator keep running while the paperwork is processed?",
+      "expected_answer": "No — it is unlawful to use the device again until the elevator subcode official has examined it and approved it for continued use.",
+      "expected_citation": "N.J.A.C. 5:23-12.11(a)2 and 12.11(b)"
+    },
+    {
+      "id": "q10",
+      "type": "single-fact",
+      "question": "What key type is required on elevators that must be equipped with a standardized fire service key under the UCC?",
+      "expected_answer": "A Yale 3502 key.",
+      "expected_citation": "N.J.A.C. 5:23-12.12(f)"
+    },
+    {
+      "id": "q11",
+      "type": "negative-control",
+      "question": "What is the minimum width required for an accessible parking space under the barrier-free subcode?",
+      "expected_answer": "Not enough information — this document (the elevator safety subcode, 5:23-12) does not cover accessible parking space dimensions; that would be in the barrier-free subcode, N.J.A.C. 5:23-7.",
+      "expected_citation": "N/A — should NOT be answered from this document; tests whether the system correctly declines rather than hallucinating from a different subchapter it may have indexed."
+    },
+    {
+      "id": "q12",
+      "type": "negative-control",
+      "question": "What edition of the International Building Code does New Jersey currently reference?",
+      "expected_answer": "Not enough information from this document — that adoption is in 5:23-3 (the building subcode adoption section), not 5:23-12 (elevator subcode). Tests cross-subchapter confusion / hallucination.",
+      "expected_citation": "N/A — out of scope for njac_5_23_12.pdf specifically, even though it's answerable from njac_5_23_3.pdf in the same corpus."
+    },
+    {
+      "id": "q13",
+      "type": "table-lookup",
+      "question": "What is the additional Departmental charge for an elevator device equipped with an auxiliary power generator, at the time of acceptance testing (not the annual inspection)?",
+      "expected_answer": "$114.00",
+      "expected_citation": "N.J.A.C. 5:23-12.6(a)2.iii"
+    },
+    {
+      "id": "q14",
+      "type": "single-fact",
+      "question": "Is education, experience, or training required by a referenced elevator safety standard (like ASME A17.1) binding in New Jersey?",
+      "expected_answer": "No — any such requirements cited in reference standards are explicitly not binding in this State.",
+      "expected_citation": "N.J.A.C. 5:23-12.2(f)"
+    },
+    {
+      "id": "q15",
+      "type": "amendment-history",
+      "question": "When was the registration fee section (5:23-12.5) last amended, and by how much did fees change?",
+      "expected_answer": "Most recently amended by R.2014 d.149, effective October 6, 2014, which updated the fee amounts (a prior 2009 amendment had substituted $68.00 for $54.00).",
+      "expected_citation": "N.J.A.C. 5:23-12.5 History block",
+      "notes": "This case deliberately targets the amendment_history metadata field rather than the primary body chunk — validates that history queries route correctly instead of failing because history was stripped from the embedded body text."
+    }
+  ]
+}
