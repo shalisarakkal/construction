@@ -63,6 +63,8 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 - [x] Frontend test suite — 38 Vitest + React Testing Library tests, including regression tests
       for 3 stale-state UI bugs found and fixed this session
 - [x] Git repository initialized and pushed to GitHub (`shalisarakkal/construction`)
+- [x] CI pipeline (`.github/workflows/ci.yml`) — runs backend pytest (incl. installing Tesseract
+      for the real-OCR test) and frontend vitest + build on every push/PR to `master`
 
 ## Known issues / backlog
 
@@ -74,7 +76,6 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       re-ingest
 - [ ] No automated eval-set runner — `NJ/eval/eval_set.json` exists but isn't wired into the test
       suite or CI
-- [ ] No CI pipeline running the test suites on push
 - [ ] Click-to-browse file picker bug (see Phase 4)
 - [ ] Default Top-K=5 on the Q&A page makes CPU-backed Ollama queries slow (3-4 min at large
       top-k); consider lowering the default or showing an elapsed-time indicator
