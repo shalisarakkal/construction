@@ -685,9 +685,27 @@ behind the browser window rather than in front of it. Diagnostic steps handed to
 taskbar/Alt+Tab for a hidden dialog window, try Incognito mode (most extensions disabled by
 default), check DevTools console for errors on click.
 
-**Deferred to backlog** — drag-and-drop is a fully working alternative upload path in the
-meantime, so this doesn't block using the app; revisit once the user reports back with diagnostic
-results.
+**Revisited 2026-09-04, code-level inspection only — still unresolved.** Checked the current
+`UploadComponent.tsx`/CSS for anything that could explain this at the code level, ruling out the
+usual structural suspects: `label[for]` and `input#id` match correctly; computed styles show
+`pointer-events: auto` on both the label and input (nothing set to `none`); `input.disabled` is
+`false`; and `document.elementFromPoint()` at the dropzone's center confirms the label itself (not
+some overlapping element) is what actually receives the click. No CSS/DOM bug found.
+
+Tried an actual click via browser automation to see whether a file dialog opens at all --
+**this was a mistake**: the automation tooling's own `file_upload` tool documentation explicitly
+warns against clicking real file inputs, since any resulting native OS dialog is outside the
+browser's DOM and isn't observable through page screenshots or `document.visibilityState` (tried
+both; both were inconclusive/misleading -- `visibilityState` stayed `"hidden"` even after clicking
+completely unrelated, dialog-free areas of the page, so it's apparently just a baseline property of
+this remote browser environment, not a signal of anything). No lasting harm -- the tab remained
+fully interactive and responsive to further clicks/navigation afterward -- but this means **browser
+automation cannot confirm or deny this bug either way**; it can only be diagnosed in a real browser
+session by a human who can actually see whether the OS file picker opens.
+
+**Still deferred to backlog** — drag-and-drop is a fully working alternative upload path in the
+meantime, so this doesn't block using the app. Next step, if picked up again, has to be the user
+testing directly (the diagnostic steps above) rather than another automated attempt.
 <!-- todo -->
 
 ### Known limitations / backlog (Phase 4)
