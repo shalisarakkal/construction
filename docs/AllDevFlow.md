@@ -1024,4 +1024,47 @@ retrieval quality.
   dilution bug did — just from an unfocused *oversized* chunk rather than a diluted merged one.
   Tracked in `PLAN.md`'s backlog rather than fixed here, to keep this session's change scoped to
   amendment-history indexing.
+  **Resolved 2026-09-04** — see "Oversized single-item chunk splitting" below.
 - Backend tests: 85 passed + 1 xfailed → **89 passed + 0 xfailed**.
+
+### Oversized single-item chunk splitting
+
+Picked up as its own fix right after the amendment-history work, following the same pattern: a
+real gap found while fixing something else, worth chasing down rather than just noting. A quick
+corpus-wide scan for oversized `njac_section` chunks (the same kind of check that surfaced the
+fence-question dilution bug) found **36 chunks up to 2,803 words** — `5:23-4.20(c).2` (found
+above) wasn't an isolated case.
+
+- **Root cause, more precisely than originally described**: two distinct dead-ends in
+  `_chunk_lettered_piece`, not one. (1) The early return when `_split_on(NUMBERED_SUB_RE, piece)`
+  finds no numbered items at all — a whole lettered piece (or whole section, if it has no lettered
+  subsections either) with no further structure, e.g. `N.J.A.C. 5:23-8.2` (1,638 words, no
+  `(a)(b)(c)` and no `1. 2. 3.`). (2) `flush()`'s single-item case — either one genuinely oversized
+  numbered item (`5:23-4.20(c).2`), or an oversized *intro* block with no numbered item of its own
+  (the `"?"`-citation case from the fence-question fix, e.g. `N.J.A.C. 5:23-1.4.?`, 1,186 words).
+  All three variants funnel through code that had no size check at all once structural splitting
+  was exhausted.
+- **Fix**: `_split_oversized_text(doc_id, title, header, citation, text)` — sentence-level
+  grouping via `split_sentences()` (the same function `_chunk_history_text()` already uses for
+  oversized History blocks, not duplicated), producing `citation (1)`, `citation (2)`, ... parts
+  each within `MAX_CHUNK_WORDS`. Wired into both dead-ends above. This is the level-4
+  "sentence-level fallback" `NJ/eval/chunking_strategy.md` sketched at design time ("Only fall
+  back to sentence-level splitting inside a single numbered item if that item alone exceeds
+  ~400 words (rare in this sample, but possible in denser subchapters like the building
+  subcode)") — correctly anticipated, just never actually built until now.
+- **Verified against all 36 originally-oversized chunks** (a standalone corpus-wide scan, not
+  just the one example found earlier): **35 of 36 fixed**. The one still over cap —
+  `N.J.A.C. 5:23-3.4(a).1 (2)`, 560 words (was 2,068) — is a PDF-extracted plan-review
+  responsibility **table** (rows of code-section/discipline/responsibility triples run together
+  with no sentence-ending punctuation for `split_sentences()` to find a boundary on). Same
+  category of difficulty Phase 0 already flagged ("§12.6 has real fee tables that a naive
+  sentence-chunker would flatten into unreadable text") — a real fix means table-aware
+  extraction, a materially different and larger problem than chunking logic. Accepted as a
+  residual limitation rather than chased further here; tracked in `PLAN.md`'s backlog. (A second,
+  unrelated 511-word chunk over cap belongs to `52_27D_119.pdf`'s **generic** chunker, not
+  `njac.py` — out of scope for this fix entirely.)
+- **Tests**: two new `test_chunkers.py` cases — a single oversized numbered item splits into
+  multiple word-capped, correctly-suffixed chunks (with neighboring items left untouched), and an
+  oversized lettered piece with no numbered structure at all splits the same way.
+- **Re-ingested the full 19-document corpus**: 2,418 → 2,482 chunks. Backend tests:
+  89 passed + 0 xfailed → **91 passed + 0 xfailed**.

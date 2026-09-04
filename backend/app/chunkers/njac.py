@@ -137,6 +137,50 @@ def _split_on(regex: re.Pattern, text: str) -> list[str]:
     return pieces
 
 
+def _split_oversized_text(doc_id: str, title: str, header: str, citation: str, text: str) -> list[dict]:
+    """Last-resort split for a piece of text that's still oversized after
+    exhausting lettered/numbered structure -- no further reliable
+    structural marker to split on (e.g. a numbered item with a deep nested
+    romanette/lettered sub-list but no clean top-level break, or an
+    oversized lettered piece / intro block with no numbered items at all).
+    Falls back to sentence-level grouping, same approach as
+    _chunk_history_text uses for oversized History blocks -- the level-4
+    fallback NJ/eval/chunking_strategy.md originally sketched ("fall back
+    to sentence-level splitting... if that item alone exceeds ~400 words")
+    but was never actually implemented. Found live: 36 chunks up to 2,803
+    words (e.g. N.J.A.C. 5:23-3.14(b).31) -- see docs/AllDevFlow.md,
+    2026-09-04."""
+    base_citation = f"N.J.A.C. {citation}"
+    header_budget = len(f"{header} {citation} (99)".split())
+    effective_cap = MAX_CHUNK_WORDS - header_budget
+
+    sentences = split_sentences(text)
+    chunks = []
+    group: list[str] = []
+    group_words = 0
+    part = 1
+
+    def flush():
+        nonlocal group, group_words, part
+        if not group:
+            return
+        part_citation = f"{base_citation} ({part})"
+        part_text = f"{header} {citation} ({part})\n" + " ".join(group)
+        chunks.append(_make_chunk(doc_id, part_citation, title, part_text))
+        part += 1
+        group = []
+        group_words = 0
+
+    for sentence in sentences:
+        words = len(sentence.split())
+        if group_words + words > effective_cap and group:
+            flush()
+        group.append(sentence)
+        group_words += words
+    flush()
+    return chunks
+
+
 def _chunk_lettered_piece(doc_id: str, citation_num: str, title: str, header: str, piece: str) -> list[dict]:
     """piece is one (a)/(b)/(c) block (or the whole section if no letters
     were found). Split further on numbered items if still too large."""
@@ -152,9 +196,9 @@ def _chunk_lettered_piece(doc_id: str, citation_num: str, title: str, header: st
     # up to MAX_CHUNK_WORDS instead of one chunk per item
     numbered_pieces = _split_on(NUMBERED_SUB_RE, piece)
     if len(numbered_pieces) <= 1:
-        # nothing to split on further; keep as one oversized chunk rather
-        # than lose content
-        return [_make_chunk(doc_id, f"N.J.A.C. {sub_citation}", title, prefixed)]
+        # No numbered items to split on further -- fall back to
+        # sentence-level grouping rather than one oversized chunk.
+        return _split_oversized_text(doc_id, title, header, sub_citation, piece)
 
     chunks = []
     group: list[str] = []
@@ -176,7 +220,14 @@ def _chunk_lettered_piece(doc_id: str, citation_num: str, title: str, header: st
                 break
         item_citation = f"{sub_citation}.{start_num}" if len(group) == 1 else f"{sub_citation}.{start_num}+"
         text = f"{header} {item_citation}\n" + "\n".join(group)
-        chunks.append(_make_chunk(doc_id, f"N.J.A.C. {item_citation}", title, text))
+        if len(group) == 1 and len(text.split()) > MAX_CHUNK_WORDS:
+            # A single item (or a single oversized intro block with no
+            # numbered item of its own -- the "?" citation case) that's
+            # still too big on its own -- no lettered/numbered structure
+            # left to split on, fall back to sentence-level grouping.
+            chunks.extend(_split_oversized_text(doc_id, title, header, item_citation, group[0]))
+        else:
+            chunks.append(_make_chunk(doc_id, f"N.J.A.C. {item_citation}", title, text))
         group = []
         group_words = 0
 

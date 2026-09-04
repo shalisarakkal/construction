@@ -167,6 +167,19 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
         `/query` returns a correct, cited answer ("...amended by R.2014 d.149, effective October 6,
         2014") instead of the old "not indexed" gap.
       - Backend tests: 85 → 89 passed (+3 new chunker tests, q15's `xfail` → real pass).
+- [x] **Oversized single-item chunks now split further.** `_chunk_lettered_piece` only ever
+      grouped/split *between* numbered items — a single item (or an oversized intro block with no
+      numbered item of its own) that was already too big on its own became one oversized chunk
+      regardless of size. Found live: 36 chunks up to 2,803 words (`N.J.A.C. 5:23-3.14(b).31`).
+      Added `_split_oversized_text()` — the level-4 "sentence-level fallback"
+      `NJ/eval/chunking_strategy.md` originally sketched for this case but never implemented —
+      reused at both dead-ends (`_chunk_lettered_piece`'s no-numbered-items early return, and
+      `flush()`'s single-oversized-item case), the same sentence-grouping approach as the
+      amendment-history fix's `_chunk_history_text()`. Re-ingested the full 19-document corpus:
+      2,418 → 2,482 chunks. **35 of 36 oversized chunks fixed** — the one remaining
+      (`N.J.A.C. 5:23-3.4(a).1 (2)`, 560 words) is a PDF-extracted table with no sentence
+      punctuation to split on, tracked separately in the backlog below (a different, harder
+      problem — table-aware extraction, not chunking logic). Backend tests: 89 → 91 passed.
 
 ## Out of scope (explicit decisions, not oversights)
 
@@ -185,11 +198,11 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       `N.J.A.C. 5:23-2.3(a).?`) when a lettered piece's oversized intro text has no numbered item
       of its own — harmless (chunk is still fully indexed and searchable) but not a clean citation
       for a user-facing answer; a real fix would derive a better label than `"?"` for that case
-- [ ] A single oversized numbered item has no further split level — found while verifying the
-      amendment-history fix: `N.J.A.C. 5:23-4.20(c).2` is one 2,038-word chunk, well over the
-      500-word cap, because `_chunk_lettered_piece` only groups/splits *between* numbered items,
-      never subdivides one item that's already oversized on its own (the level-4 "sentence-level
-      fallback" `NJ/eval/chunking_strategy.md` originally sketched for this case was never actually
-      implemented). Pre-existing, not something this session's chunking work introduced or fixed —
-      likely hurts retrieval the same way the fence-question dilution bug did, just from being too
-      large/unfocused rather than too small/diluted.
+- [ ] One chunk in the whole corpus is still over the 500-word cap (560 words,
+      `N.J.A.C. 5:23-3.4(a).1 (2)`) — it's a PDF-extracted plan-review responsibility **table**
+      (row after row of code-section/discipline/responsibility triples run together with no
+      sentence-ending punctuation), so `split_sentences()` can't find a boundary to split it on.
+      Same category of difficulty as Phase 0's fee-table discovery ("a naive sentence-chunker
+      would flatten tables into unreadable text") — a real fix means table-aware extraction, not
+      another regex tweak. Accepted as a residual limitation given it's 1 chunk out of 2,136 and
+      only 12% over cap, not chased further as part of the oversized-chunk fix below.

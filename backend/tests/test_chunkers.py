@@ -222,6 +222,58 @@ def test_njac_chunk_splits_oversized_history_into_multiple_chunks():
     ]
 
 
+def test_njac_chunk_splits_a_single_oversized_numbered_item():
+    # Regression test: a single numbered item with no further lettered/
+    # romanette/numbered sub-structure to split on used to become one
+    # oversized chunk regardless of size -- found live in the real corpus,
+    # up to 2,803 words (N.J.A.C. 5:23-3.14(b).31). See
+    # _split_oversized_text in app/chunkers/njac.py.
+    sentence = "This is a sentence about a specific requirement. "
+    huge_item = "2. " + (sentence * 150)  # ~1650 words, one numbered item
+    text = (
+        "N.J.A.C. 5:23-4.20\n\n"
+        "§ 5:23-4.20 Big Section\n"
+        # The "(a)" marker itself always counts as leading text ahead of
+        # item 1 (see _split_on), so item 1 always merges as ".1+" -- not
+        # what this test is about, so don't assert an exact citation for it.
+        f"(a)\n1. Short first item.\n{huge_item}\n3. Short third item.\n"
+        "End of Document"
+    )
+
+    chunks = njac_chunk("doc1", text)
+
+    item2_chunks = [c for c in chunks if c["citation"].startswith("N.J.A.C. 5:23-4.20(a).2")]
+    assert len(item2_chunks) > 1
+    assert all(c["word_count"] <= 500 for c in item2_chunks)
+    assert [c["citation"] for c in item2_chunks] == [
+        f"N.J.A.C. 5:23-4.20(a).2 ({i + 1})" for i in range(len(item2_chunks))
+    ]
+    # Items 1 and 3 are untouched by the oversized-item split.
+    assert any(c["citation"] == "N.J.A.C. 5:23-4.20(a).1+" for c in chunks)
+    assert any(c["citation"] == "N.J.A.C. 5:23-4.20(a).3" for c in chunks)
+
+
+def test_njac_chunk_splits_an_oversized_lettered_piece_with_no_numbered_items():
+    # Regression test: an oversized lettered piece (or whole section) with
+    # no numbered items at all to split on used to become one oversized
+    # chunk regardless of size -- found live, e.g. N.J.A.C. 5:23-8.2
+    # (1,638 words, no lettered/numbered structure at all).
+    sentence = "This is a sentence describing a general requirement. "
+    text = (
+        "N.J.A.C. 5:23-8.2\n\n"
+        f"§ 5:23-8.2 Big Section\n{sentence * 150}\n"
+        "End of Document"
+    )
+
+    chunks = njac_chunk("doc1", text)
+
+    assert len(chunks) > 1
+    assert all(c["word_count"] <= 500 for c in chunks)
+    assert [c["citation"] for c in chunks] == [
+        f"N.J.A.C. 5:23-8.2 ({i + 1})" for i in range(len(chunks))
+    ]
+
+
 def test_dedupe_chunk_ids_disambiguates_collisions():
     chunks = [
         {"chunk_id": "doc1__5:23-1(a).1+"},
