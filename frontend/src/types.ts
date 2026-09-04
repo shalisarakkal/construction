@@ -3,7 +3,7 @@
 export interface ChunkRecord {
   chunk_id: string;
   doc_id: string;
-  chunk_type: "njac_section" | "njac_history" | "generic";
+  chunk_type: "njac_section" | "njac_history" | "statute_section" | "statute_history" | "generic";
   citation: string | null;
   section_title: string | null;
   page_number: number | null;

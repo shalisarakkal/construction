@@ -6,7 +6,7 @@ from pydantic import BaseModel
 class ChunkRecord(BaseModel):
     chunk_id: str
     doc_id: str
-    chunk_type: Literal["njac_section", "njac_history", "generic"]
+    chunk_type: Literal["njac_section", "njac_history", "statute_section", "statute_history", "generic"]
     citation: str | None = None
     section_title: str | None = None
     page_number: int | None = None

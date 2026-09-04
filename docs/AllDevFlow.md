@@ -1060,11 +1060,112 @@ above) wasn't an isolated case.
   category of difficulty Phase 0 already flagged ("§12.6 has real fee tables that a naive
   sentence-chunker would flatten into unreadable text") — a real fix means table-aware
   extraction, a materially different and larger problem than chunking logic. Accepted as a
-  residual limitation rather than chased further here; tracked in `PLAN.md`'s backlog. (A second,
-  unrelated 511-word chunk over cap belongs to `52_27D_119.pdf`'s **generic** chunker, not
-  `njac.py` — out of scope for this fix entirely.)
+  residual limitation rather than chased further here; tracked in `PLAN.md`'s backlog. (At the
+  time this was written, a second, unrelated 511-word chunk over cap belonged to `52_27D_119.pdf`'s
+  generic chunker -- moot now, see "Structure-aware chunker for statute PDFs" below: that document
+  isn't generic-chunked anymore.)
 - **Tests**: two new `test_chunkers.py` cases — a single oversized numbered item splits into
   multiple word-capped, correctly-suffixed chunks (with neighboring items left untouched), and an
   oversized lettered piece with no numbered structure at all splits the same way.
 - **Re-ingested the full 19-document corpus**: 2,418 → 2,482 chunks. Backend tests:
   89 passed + 0 xfailed → **91 passed + 0 xfailed**.
+
+### Structure-aware chunker for statute PDFs
+
+Continuing "chunking/retrieval quality" work (user's framing) after the oversized-chunk fix,
+without a specific bug already in hand to chase this time -- so the investigation started from the
+data itself, the same way the fence-question dilution bug was originally found: look at what's
+actually indexed, not just what the code is supposed to do.
+
+**Investigation.** `52_27D_119.pdf` (the UCC Act, 2nd-largest single document in the corpus by
+chunk count) is a LexisNexis-exported "New Jersey Annotated Statutes" PDF, not plain statute
+text. Checked its structure directly (page dumps, marker counts) and found it has the *exact* same
+per-section pattern as the NJAC exports -- repeated page boilerplate, `History`, `Annotations`,
+`End of Document` (134 sections, 100% with `History`, 76 with `Annotations`) -- but it was being
+routed through the **generic** (word-count) chunker, which has zero structural awareness. Each
+statute section is really: `[short operative text]` + `[case-law summaries under LexisNexis
+headnote topic tags]` + `[Cross References / Research References]`, all chunked as undifferentiated
+prose. Concrete example: `§ 52:27D-131` ("Construction permits...") is a 4-page section; pages 1-2
+are ~2 paragraphs of actual statute text, pages 3-4 are **entirely** case-law summaries and
+cross-reference lists with zero operative content. And this wasn't hypothetical: **that exact page
+was one of the top-3 retrieved chunks for the original fence-permit question**, before this
+session's njac.py fixes -- pure annotation noise competing for a retrieval slot against real
+regulatory content.
+
+This is a materially different kind of finding than the three chunking bugs above: those were
+unambiguous engineering defects; this was a scope/design question (is case-law commentary useful
+content here, or noise to strip?) plus a build of comparable size to `njac.py` itself. Presented
+the finding and three options (build a real structure-aware chunker, a cheaper regex-only
+mitigation, or just document and move on) rather than unilaterally committing to the larger build.
+User picked the structure-aware chunker.
+
+**Design.** Rather than duplicate `njac.py`'s ~250 lines of recursive lettered/numbered splitting,
+oversized-chunk fallback, and History handling for a second, structurally-identical format,
+extracted the shared engine into `app/chunkers/_legal_doc.py`, config-driven via a
+`LegalDocConfig` dataclass (citation prefix, chunk-type names, section/lettered/numbered regexes,
+page-boilerplate patterns, cross-reference patterns). `njac.py` is now a thin
+NJAC-specific config wrapper around it; `app/chunkers/statute.py` is a second, equally thin
+wrapper for the Lexis-statute format. This is the "Rule of Three" case for abstraction done right:
+not extracted speculatively ahead of a proven second use case, but the moment one genuinely
+appeared -- verified the refactor didn't change njac.py's behavior at all (every pre-existing
+njac.py test passes unmodified against the refactored engine).
+
+Format differences configured, not hard-coded:
+- **Citation pattern**: `§ 52:27D-XXX[.X][letter].` (note the period after the citation number --
+  NJAC's format has none, e.g. `"§ 5:23-12.5 Registration fee"` vs. `"§ 52:27D-121. Definitions"`).
+- **Lettered/numbered delimiters are the mirror image of NJAC's**: statutes use `a.`/`(1)`
+  (letter+period, then parenthesized number) where NJAC uses `(a)`/`1.` (parenthesized letter,
+  then number+period) -- confirmed via corpus-wide scan (64/134 sections have lettered
+  subsections, 27/134 have numbered sub-items, so this is real structure worth splitting on
+  properly, not a rare edge case worth punting to sentence-level fallback).
+- **Page boilerplate**: a per-section LexisNexis breadcrumb (`Title > Subtitle > Chapter >
+  Article`, different text per section since it names that section's own chapter/article -- matched
+  structurally, from "LexisNexis...Annotated Statutes" up to the next true line-start heading,
+  rather than as fixed text) and a "Current through New Jersey ... Session" register-currency line
+  that changes with every legislative session (matched by line prefix, not the specific date).
+
+**Annotations dropped, not indexed separately.** Unlike History (kept, same treatment as
+`njac_history`), `Annotations` content here is dropped entirely rather than turned into its own
+chunk type -- a deliberate decision, not an oversight. Case-law commentary about a statute is a
+different kind of content from the statute's own text or its enactment history, and was the
+concrete, measured source of the retrieval pollution that motivated this whole investigation.
+
+**Two real bugs found and fixed while building this** (both in the shared engine, both benefiting
+njac.py too even though njac.py's own tests never happened to exercise them):
+1. The heading-strip/repeated-heading-dedupe logic (`_dedupe_repeated_heading`, and the
+   heading-strip line in `chunk_legal_document`) constructed its match string as
+   `f"§ {citation_num} {title}"` -- correct for NJAC's no-period format, but a **silent no-op**
+   for every statute section (period present, so the constructed string never matched the real
+   text). Found via a real output bug: a section's top-level chunk showed only its own heading
+   text with no body, because the "intro" piece ahead of the first lettered subsection (which
+   should have been just the heading) wasn't being stripped from *later* pieces correctly and the
+   whole thing looked truncated at first glance -- turned out to be expected intro-chunk behavior
+   once traced through properly, but tracing it surfaced this real, separate bug: repeated
+   mid-section heading duplicates were never being deduped for statute text at all. Fixed with a
+   single shared, period-tolerant heading regex (`_heading_pattern`) used by both call sites.
+2. 58 of 134 statute sections have **no** `Annotations` block at all -- for those, the trailing
+   `LexisNexis(R) New Jersey Annotated Statutes / Copyright ...` footer (present in literally every
+   section) has no `Annotations` label ahead of it to trigger the usual stripping, and was leaking
+   straight into the **History** chunk for those sections (found live, e.g. `52:27D-122.1`). Fixed
+   with a dedicated boilerplate pattern stripped unconditionally, before the History/Annotations
+   split ever happens.
+
+**Verified against the real corpus.** Re-ingested all 19 documents: `52_27D_119.pdf` went from
+318 generic chunks to **437 structured ones** (303 `statute_section` + 134 `statute_history`).
+Corpus total: 2,482 → **2,601 chunks**. Confirmed zero chunks in the whole corpus contain any
+case-law content (`SELECT ... WHERE text LIKE '%Cherry Hill Towers%'` -> 0 rows, down from the
+chunk that previously ranked in real query results for the fence question). Re-ran the exact
+fence-permit question: the fence-provision chunk is still the top result (score 0.567, unchanged
+from the njac.py fix), and the annotation-noise chunk that used to occupy the #5 slot is now a
+real operative provision (`N.J. Stat. § 52:27D-123.17`, score 0.452) instead.
+
+**New residual limitation found**: one statute chunk (`§ 52:27D-141.19.? (1)`, 628 words) is still
+over the word cap -- a dense run of short quoted definitions ("`Air purifier` means...") that
+`split_sentences()`'s grouping didn't cap correctly; not yet root-caused (possibly quote-mark or
+abbreviation punctuation confusing sentence-boundary detection). Tracked in `PLAN.md` alongside the
+pre-existing table-chunk limitation rather than chased further here -- 2 chunks out of 2,601.
+
+**Tests**: 8 new `test_statute_chunker.py` cases -- detection, basic chunking, boilerplate/
+breadcrumb stripping, lettered subsection splitting, numbered sub-item splitting, History
+separated from dropped Annotations, and the no-Annotations copyright-footer regression. Backend
+tests: 91 passed + 0 xfailed → **99 passed + 0 xfailed**.

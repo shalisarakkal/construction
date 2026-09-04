@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 
 from . import vector_store
-from .chunkers import generic_chunk, looks_like_njac, njac_chunk
+from .chunkers import generic_chunk, looks_like_njac, looks_like_statute, njac_chunk, statute_chunk
 from .config import settings
 from .embeddings import embed_texts
 from .extractors import extract_docx_pages, extract_pdf_pages, extract_txt_pages
@@ -86,6 +86,19 @@ def ingest_document(file_bytes: bytes, filename: str, title: str | None,
             # (RESERVED)") passes the sniff but has no section to chunk on.
             # Fall back to the generic chunker rather than erroring on a
             # document that plainly has real, extractable text.
+            chunker_used = "generic"
+            chunks = generic_chunk(doc_id, pages)
+    elif looks_like_statute(full_text):
+        # LexisNexis-exported "NJ Annotated Statutes" PDFs (e.g. the UCC Act,
+        # 52_27D_119.pdf) have the same repeated-boilerplate/History/
+        # Annotations structure as NJAC exports but with different citation/
+        # subsection delimiters -- see chunkers/statute.py and
+        # docs/AllDevFlow.md, 2026-09-04 (previously routed through the
+        # generic chunker, which mixed case-law annotation noise directly
+        # into indexed regulatory-text chunks).
+        chunker_used = "statute"
+        chunks = statute_chunk(doc_id, full_text)
+        if not chunks:
             chunker_used = "generic"
             chunks = generic_chunk(doc_id, pages)
     else:
