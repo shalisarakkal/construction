@@ -258,11 +258,41 @@ The 4 OCR failures are handled cleanly (`ingestion.py` raises a clear 4xx-style 
 crashing or silently indexing nothing). Decision: leave these for Phase 2 rather than rush an OCR
 fallback into Phase 1; will be revisited as part of the planned OCR work below.
 
-Note: subchapter 10 (`njac_5_23_10.pdf`) is not present in `NJ/pdfs/` at all. Most individual
-subchapter files (1, 2, 4, 5, 8, 9, 11) were manually copied in by the user rather than scraped
-via `NJ/links.md`, so this isn't confirmed as "doesn't exist on the source site" — just not yet
-obtained. Worth checking https://www.nj.gov/dca/codes/codreg/current.shtml directly if subchapter
-10 content is needed later.
+**Resolved 2026-09-04 — corpus is now complete.** This note originally flagged that subchapter 10
+wasn't present and that the manually-copied files hadn't been checked against an authoritative
+source list. Investigated properly: `NJ/links.md` (scraped from `current.shtml`) turned out to be
+a narrower "external code cross-reference" page — it only lists subchapters that adopt an outside
+I-Code (3, 6, 7, 12), not a table of contents. The actual subchapter index is
+`https://www.nj.gov/dca/codes/codreg/ucc.shtml` (itself linked from `NJ/links.md`), which lists
+all 17 N.J.A.C. 5:23 subchapters by number and title. Checked every one against `NJ/pdfs/`: the
+user manually downloaded the two that were missing —
+`njac_5_23_10.pdf` (Radon Hazard Subcode) and `njac_5_23_12A.pdf` (Optional Elevator Inspection
+Program) — and all 17 are now present, matching the authoritative listing exactly:
+
+| # | Title | Present |
+|---|---|---|
+| 1 | General Provisions | ✅ |
+| 2 | Administration and Enforcement; Process | ✅ |
+| 3 | Subcodes (Building/Plumbing/Electrical/Energy/Mechanical/1&2-Family/Fuel Gas) | ✅ |
+| 3A | State-Jurisdiction Subcodes | ✅ |
+| 4 | Enforcing Agencies; Duties; Powers; Procedures | ✅ |
+| 4A | Industrialized/Modular Buildings and Building Components | ✅ |
+| 4B & C | (Reserved) | ✅ |
+| 4D | Recreational Park Trailers | ✅ |
+| 5 | Licensing of Code Enforcement Officials | ✅ |
+| 6 | Rehabilitation Subcode | ✅ |
+| 7 | Barrier Free Subcode | ✅ |
+| 8 | Asbestos Hazard Abatement Subcode | ✅ |
+| 9 | Code Interpretations | ✅ |
+| 10 | Radon Hazard Subcode | ✅ (added 2026-09-04) |
+| 11 | Playground Safety Subcode | ✅ |
+| 12 | Elevator Safety Subcode | ✅ |
+| 12A | Optional Elevator Inspection Program | ✅ (added 2026-09-04) |
+
+Both new files ingested via the live `/upload` API (35 and 18 chunks respectively, both correctly
+`njac`-chunked) — no re-ingest of the rest of the corpus needed, since adding a document doesn't
+affect existing ones. Corpus is now **19 documents, 2,108 chunks** (up from the 17/2,055 baseline
+set by this session's chunking-fix re-ingest — see "Beyond dream.md scope" below for that work).
 
 ### Known limitations / backlog (carried from Phase-0 planning review + new ones found while building)
 

@@ -126,6 +126,15 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       (2,055 vectors == 2,055 live chunks), so `compact_index()` wasn't needed this time, but is
       now available as reusable maintenance tooling for future deletes/supersedes without a full
       re-ingest.
+- [x] Source corpus completed against the authoritative N.J.A.C. 5:23 table of contents
+      (`https://www.nj.gov/dca/codes/codreg/ucc.shtml`, linked from `NJ/links.md` but not itself
+      previously checked — `NJ/links.md`/`current.shtml` turned out to be a narrower "external
+      code cross-reference" page, not a full index, which is why several subchapters were never in
+      it despite existing). All 17 listed subchapters are now present in `NJ/pdfs/`: the user
+      manually downloaded the two that were missing, `njac_5_23_10.pdf` (Radon Hazard Subcode) and
+      `njac_5_23_12A.pdf` (Optional Elevator Inspection Program), and both were ingested into the
+      live corpus via the real `/upload` API (35 and 18 chunks). Corpus is now 19 documents, 2,108
+      chunks.
 
 ## Known issues / backlog
 
