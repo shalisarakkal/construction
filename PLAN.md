@@ -34,7 +34,13 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 - [x] Summary page (document picker, generate summary, truncation notice, download `.txt`)
 - [x] Document versioning UI (Replace action, superseded badge, show-all-versions toggle)
 - [ ] Visual/design QA pass (layout, responsiveness, dark mode) — functionality is verified,
-      appearance has not been formally reviewed
+      appearance has not been formally reviewed. Scope includes: replacing `DocumentList`'s
+      native `window.confirm()` delete confirmation with an in-app modal — user decision
+      2026-09-04, folded into this pass rather than done as a standalone fix. Not a correctness
+      bug (native confirm is a defensible choice for a destructive action — synchronous, can't be
+      styled into a misclickable state, users already trust it), just a visual-consistency gap:
+      it doesn't respect the app's theme/dark-mode and can't show styled/rich content (e.g. a
+      bolded doc title).
 
 ## Phase 5 — Scaling + Optional Cloud
 
