@@ -703,9 +703,15 @@ fully interactive and responsive to further clicks/navigation afterward -- but t
 automation cannot confirm or deny this bug either way**; it can only be diagnosed in a real browser
 session by a human who can actually see whether the OS file picker opens.
 
-**Still deferred to backlog** — drag-and-drop is a fully working alternative upload path in the
-meantime, so this doesn't block using the app. Next step, if picked up again, has to be the user
-testing directly (the diagnostic steps above) rather than another automated attempt.
+**Closed, won't-fix — user decision 2026-09-04.** A third pass (same day) re-checked the current
+code for regressions or anything missed: `UploadComponent.tsx` unchanged since the async-upload
+work, `label[for]`/`input#id` still match, no `pointer-events: none`, no global click listeners or
+`stopPropagation`/`preventDefault` outside the modals and drag handlers, and the component is
+mounted exactly once (no duplicate-`id` collision possible). Nothing new found. The diagnostic
+steps above were handed to the user again, but the user then said to ignore the bug entirely rather
+than pursue it further. Drag-and-drop remains a fully working alternative upload path, so this
+never blocked using the app. Leaving this section in place as the diagnostic record if it ever
+resurfaces.
 <!-- todo -->
 
 ### Known limitations / backlog (Phase 4)
@@ -715,18 +721,14 @@ testing directly (the diagnostic steps above) rather than another automated atte
   quality/prompt is not.
   **Resolved** — validated end-to-end against a real local LLM (Ollama, see "Beyond dream.md
   scope — LLM provider switch" below), not just the unconfigured-503 path.
-- **No visual/design QA pass yet** — pages render and the data flows correctly, but no one has
-  reviewed spacing, responsiveness, or dark-mode behavior in a real browser session yet.
-  Still open as of 2026-09-04 — only functional/behavioral verification has happened since
-  (upload flow, replace flow, etc.), no dedicated visual pass.
-  <!-- todo -->
-- **Click-to-browse file picker bug** — see dedicated section above. Still open as of
-  2026-09-04 — no further diagnostic info has come back from the user, and the code hasn't
-  changed since the fix attempt described above didn't resolve it. `PLAN.md` checks off
-  "Upload page (drag-and-drop + click-to-browse, ...)" as done, but that reflects the feature
-  existing and drag-and-drop working, not confirmation that click-to-browse itself was fixed —
-  don't read that checkbox as contradicting this section.
-  <!-- todo -->
+- **No visual/design QA pass yet.**
+  **Resolved 2026-09-04** — see the dedicated "Visual/design QA pass" section further down for
+  the 3 issues found and fixed (dark-mode confidence badges, table overflow, delete confirmation
+  modal).
+- **Click-to-browse file picker bug** — see dedicated section above.
+  **Closed, won't-fix — user decision 2026-09-04.** A third code-level pass (same day) found
+  nothing new; the user then chose to drop it rather than pursue further diagnosis. Drag-and-drop
+  remains the working upload path.
 
 ---
 

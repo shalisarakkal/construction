@@ -265,17 +265,10 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 
 ## Known issues / backlog
 
-- [ ] Click-to-browse doesn't open the file picker (user-reported on their own machine;
-      drag-and-drop works fine as an alternative). Revisited 2026-09-04: code-level inspection
-      found no CSS/DOM bug (`label[for]`/`input#id` match, `pointer-events: auto` throughout,
-      input not disabled, `elementFromPoint()` confirms the label receives the click) — the code
-      itself looks correct. Browser automation can't confirm or deny the actual bug either way,
-      since a real fix attempt requires clicking a live file input, and any resulting native OS
-      dialog is invisible to page screenshots/`document.visibilityState` (confirmed both are
-      unreliable signals for this in the automation environment used). Needs the user to test
-      directly in their own browser (check DevTools console for errors on click, try Incognito to
-      rule out extensions, Alt+Tab/taskbar for a dialog hidden behind the window) — see
-      `docs/AllDevFlow.md`'s dedicated section for full diagnostic history.
+- [x] ~~Click-to-browse doesn't open the file picker~~ — **closed, won't-fix, 2026-09-04.** User
+      decision: ignore it. Two rounds of code-level inspection found no CSS/DOM bug; drag-and-drop
+      remains a fully working alternative upload path. See `docs/AllDevFlow.md`'s dedicated
+      section for full diagnostic history if this ever resurfaces.
 - [ ] No schema migration tooling — every schema change so far has required a full storage wipe +
       re-ingest
 - [ ] This dev machine's GPU (GTX 1060 3GB) can't meaningfully accelerate the 8B Ollama model —
