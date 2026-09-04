@@ -53,12 +53,13 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       `RAG_OLLAMA_NUM_GPU` for CPU/GPU offload tuning
 - [x] Summary generation validated end-to-end against a real local LLM (Ollama), not just the
       unconfigured-503 path
-- [x] Backend test suite — 80 pytest tests (79 passing + 1 documented xfail): chunkers, extractors
+- [x] Backend test suite — 82 pytest tests (81 passing + 1 documented xfail): chunkers, extractors
       (including real Tesseract OCR), LLM provider switching (mocked), vector_store internals, all
       4 routers, full upload→query→summary→delete integration lifecycles, and the eval-set runner
       below
-- [x] Frontend test suite — 38 Vitest + React Testing Library tests, including regression tests
-      for 3 stale-state UI bugs found and fixed this session
+- [x] Frontend test suite — 43 Vitest + React Testing Library tests, including regression tests
+      for stale-state UI bugs found and fixed along the way (3 originally, plus the async-upload
+      Replace-flow bug below)
 - [x] Git repository initialized and pushed to GitHub (`shalisarakkal/construction`)
 - [x] CI pipeline (`.github/workflows/ci.yml`) — runs backend pytest (incl. installing Tesseract
       for the real-OCR test) and frontend vitest + build on every push/PR to `master`
@@ -92,6 +93,13 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       and shows a `Processing…` state. Verified against a real running server (isolated storage
       dir, not the dev corpus): POST returned instantly with `status: "queued"`, transitioned to
       `processing`, then `done` with the full result once ingestion finished.
+- [x] Fixed `DocumentList`'s "Replace" action for the now-async `/upload` — it was still awaiting
+      `uploadDocument()` as if it resolved with the finished result, refreshing the document list
+      right after the job was enqueued rather than after it actually finished superseding the old
+      document. Now polls the job (shared `pollJobUntilDone()`, factored out into
+      `frontend/src/uploadJob.ts`) and only refreshes once it completes; verified manually in a
+      real browser against isolated storage (success path, and the 409-duplicate error path
+      leaving the table unchanged).
 
 ## Known issues / backlog
 

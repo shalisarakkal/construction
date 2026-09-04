@@ -13,14 +13,21 @@ This log tracks how that plan evolved as it met real documents and real constrai
 
 ## Status at a glance
 
+*(Updated 2026-09-04 — see `PLAN.md` for the flat, fast-scan checklist this table summarizes;
+this file stays the narrative/rationale companion to it, per the note at the top of this doc.)*
+
 | Phase (per dream.md) | Status |
 |---|---|
 | Phase 0 — Source docs + chunking strategy sketch | ✅ Done |
 | Phase 1 — Core backend (FastAPI, PDF parsing, chunking, embeddings, FAISS, `/query`) | ✅ Done |
 | Phase 2 — OCR + CAD/GIS support | ✅ Done |
-| Phase 3 — Citations + confidence refinement | Not started |
-| Phase 4 — React UI | 🔨 In progress |
+| Phase 3 — Citations + confidence refinement | ✅ Done |
+| Phase 4 — React UI | ✅ Done, except a visual/design QA pass (layout, responsiveness, dark mode) |
 | Phase 5 — Scaling + cloud | Not started |
+
+Substantial work also happened outside dream.md's phase list entirely — document versioning, a
+pluggable LLM provider switch, an async upload pipeline, and a full test/CI setup. See "Beyond
+dream.md scope" below, in the order it was built.
 
 ---
 
@@ -263,16 +270,19 @@ obtained. Worth checking https://www.nj.gov/dca/codes/codreg/current.shtml direc
   should push this to a background job (Celery/RQ) with a status-polling endpoint, matching the
   "show processing stages" UI requirement in dream.md section 6.1.A. Deferred because Phase 1's
   goal was a working core loop, not production hardening.
-  <!-- todo -->
+  **Resolved** — see "Beyond dream.md scope — `/upload` moved to an async background job" below
+  (ended up using FastAPI `BackgroundTasks` rather than Celery/RQ; no separate broker needed at
+  this scale).
 - **No document versioning.** Re-uploading a revised PDF creates a new `doc_id` with its own
   chunks; old chunks aren't superseded. Construction docs get revised via addenda constantly —
   this needs a real decision (replace-on-reupload vs. version-tag + "latest" filter) before
   Phase 2.
-  <!-- todo -->
+  **Resolved** — see Phase 2's "Document versioning" section below.
 - **No eval automation yet.** `NJ/eval/eval_set.json` exists but nothing runs it against the
   live `/query` endpoint automatically. Worth a small script before iterating further on
   chunking/retrieval quality, so regressions are caught rather than eyeballed.
-  <!-- todo -->
+  **Resolved** — see "Beyond dream.md scope — eval-set runner wired up as a regression test"
+  below.
 - **Generic chunker's sentence splitter is regex-based, not NLTK/spaCy.** Chosen to avoid a
   runtime model-download dependency for Phase 1. Fine for straightforward paragraph prose; revisit
   if real engineering-note documents (Phase 2 CAD/GIS exports) show poor sentence boundaries.
@@ -524,7 +534,11 @@ matches the same local-first reasoning already used for `embeddings.py` (see Pha
 - New setting: `RAG_LLM_PROVIDER=anthropic|ollama` (default `anthropic`, unchanged behavior).
   Ollama-specific settings: `RAG_OLLAMA_BASE_URL` (default `http://localhost:11434`),
   `RAG_OLLAMA_MODEL` (default `llama3.1`) — no API key needed for Ollama, since it's a local server
-  process, not a cloud call.
+  process, not a cloud call. `RAG_OLLAMA_NUM_GPU` (optional; forwarded as `options.num_gpu` in the
+  Ollama `/api/chat` request body) was added after the end-to-end verification below surfaced a
+  real perf issue on this dev machine — see the note there. `_ollama_chat` also uses a 300s
+  timeout (bumped up from Ollama's own 120s default, too short for CPU-only inference on an 8B
+  model).
 - Ollama calls use Python's stdlib `urllib.request` (raw HTTP POST to `/api/chat`), not a new pip
   dependency — the request/response shape is simple enough not to need an SDK.
 - `is_configured()` now means different things per provider: for Anthropic it's still a static "is a
@@ -540,9 +554,13 @@ matches the same local-first reasoning already used for `embeddings.py` (see Pha
 - **Verified**: backend restarted with the new code (no schema change, no re-ingest needed — this is
   fully orthogonal to storage); confirmed `/query` still returns `llm_used: false, answer: null`
   correctly with no provider configured (regression check against the existing no-key behavior).
-  The Ollama path itself has not been exercised end-to-end yet — that requires Ollama actually
-  installed and running locally, which hasn't happened in this environment yet.
-  <!-- todo -->
+- **Ollama path since exercised end-to-end**: Ollama was installed and a model pulled locally,
+  and summary generation (see Phase 4's summary endpoint above) was validated against it for
+  real — not just the unconfigured-503 path. This is also where `RAG_OLLAMA_NUM_GPU` came from:
+  this dev machine's GPU (GTX 1060 3GB) can't meaningfully accelerate the 8B model, so
+  `RAG_OLLAMA_NUM_GPU=0` (forcing CPU-only) is currently faster than automatic partial GPU
+  offload — see `PLAN.md`'s backlog for this as an open, machine-specific limitation rather than
+  a bug to fix in code.
 
 ---
 
@@ -633,9 +651,184 @@ results.
 - **Summary generation untested against a real LLM call** — no `RAG_ANTHROPIC_API_KEY` configured
   in this environment yet; the 503-when-unconfigured path is verified, the actual summarization
   quality/prompt is not.
-  <!-- todo -->
+  **Resolved** — validated end-to-end against a real local LLM (Ollama, see "Beyond dream.md
+  scope — LLM provider switch" below), not just the unconfigured-503 path.
 - **No visual/design QA pass yet** — pages render and the data flows correctly, but no one has
   reviewed spacing, responsiveness, or dark-mode behavior in a real browser session yet.
+  Still open as of 2026-09-04 — only functional/behavioral verification has happened since
+  (upload flow, replace flow, etc.), no dedicated visual pass.
   <!-- todo -->
-- **Click-to-browse file picker bug** — see dedicated section above.
+- **Click-to-browse file picker bug** — see dedicated section above. Still open as of
+  2026-09-04 — no further diagnostic info has come back from the user, and the code hasn't
+  changed since the fix attempt described above didn't resolve it. `PLAN.md` checks off
+  "Upload page (drag-and-drop + click-to-browse, ...)" as done, but that reflects the feature
+  existing and drag-and-drop working, not confirmation that click-to-browse itself was fixed —
+  don't read that checkbox as contradicting this section.
   <!-- todo -->
+
+---
+
+## Beyond dream.md scope — testing, CI, and operational hardening
+
+Everything in this section falls outside dream.md's phase list. Ordered by when it landed (see
+git log — each has its own commit from this point on, unlike Phases 0-4 above which were built
+and squashed into a single initial commit before this repo's git history starts).
+
+### PLAN.md progress checklist
+
+Added `PLAN.md` at the project root: a flat checklist mirrored against dream.md's phases, plus
+"beyond scope" and "known issues/backlog" sections. This file (`AllDevFlow.md`) stays the
+narrative/rationale record; `PLAN.md` is the fast-scan companion for "what's left" without
+reading prose. Keep both in sync going forward — `PLAN.md`'s own header says as much.
+
+### Summary page loading state
+
+Small UX gap: `SummaryPage`'s "Generate Summary" button gave no feedback while the LLM call was
+in flight — the Q&A page already showed a loading message, but Summary generation (which can
+take a couple of minutes on a CPU-backed local Ollama model) only had the button's own label as
+feedback. Added a matching `"Generating summary… this can take a couple of minutes."` message,
+gated on the same `loading` state.
+
+### CI pipeline
+
+Added `.github/workflows/ci.yml`, running on every push/PR to `master`:
+
+- **Backend job** — installs Tesseract OCR (`apt-get install tesseract-ocr`) so the real-OCR test
+  (see Phase 2's OCR verification above) runs in CI exactly as it does locally, not skipped/mocked
+  — then `pip install -r requirements.txt` and `pytest tests/ -v`.
+- **Frontend job** — `npm ci`, `npm test` (Vitest), then `npm run build` (which runs `tsc -b`
+  first per `package.json`'s build script, so a type error fails CI the same as a broken build
+  would).
+
+Both jobs run independently (no dependency between them) so a backend-only or frontend-only
+change gets fast feedback without waiting on the other stack.
+
+### Backend and frontend automated test suites
+
+Not previously documented here even though they existed from this repo's first commit. Current
+state (2026-09-04): **82 backend pytest tests** (81 passing + 1 documented `xfail` — see the
+eval-set section below for what that xfail is) and **43 frontend Vitest + React Testing Library
+tests**.
+
+- **Backend** (`backend/tests/`) — one file per router/module (chunkers, extractors including a
+  real Tesseract OCR run rather than a mock, LLM provider switching with the provider mocked,
+  `vector_store` internals) plus `test_integration.py` for full
+  upload→list→query→summary→delete lifecycles that touch all four routers together, and
+  `test_eval_set.py` (see below). `backend/tests/conftest.py`'s `isolated_storage` fixture points
+  `settings.storage_dir` at a per-test `tmp_path` so tests never touch the real dev
+  database/FAISS index.
+- **Frontend** — one `.test.tsx` per component/page, mocking `../api` (`vi.mock`) so component
+  tests don't depend on a running backend. Several of these tests exist specifically as
+  regression tests for real stale-state UI bugs found while building/testing the app (not
+  hypothetical edge cases) — e.g. `UploadComponent`'s per-batch entry list not resetting between
+  upload batches, and (added 2026-09-04) `DocumentList`'s Replace action not waiting for its
+  background job — see "The async `/upload` background job" below for that one.
+
+### Eval-set runner wired up as a regression test
+
+`NJ/eval/eval_set.json` (Phase 0's 15 hand-verified Q&A cases against `njac_5_23_12.pdf`,
+including 2 negative controls — see Phase 0 above) existed from the very start of the project but
+nothing ever ran it automatically; Phase 1's "Known limitations" section above flagged this
+explicitly. Added `backend/tests/test_eval_set.py`, which:
+
+- Ingests **only** `njac_5_23_12.pdf` into an isolated per-test corpus (matching the eval set's
+  original single-document design) rather than running against the full multi-document production
+  corpus, which gives noisier/less meaningful results — a question written to test one specific
+  document's retrieval shouldn't be scored against unrelated documents diluting the top-k.
+- Runs all 15 cases through the live `/query` path and asserts against the expected
+  citation/confidence behavior.
+
+This surfaced two genuine findings — the eval set had simply never run before to catch them:
+
+1. **The amendment-history case (q15) is a documented `xfail`, not a pass/fail toggle.** Section
+   retrieval correctly finds `5:23-12.5`, but the actual answer (the 2014 amendment date/fee
+   change) isn't retrievable, because `njac.py`'s `HISTORY_SPLIT_RE` deliberately strips each
+   section's `HISTORY:` block before indexing (see Phase 0's chunking discovery above — that
+   block was identified early on as "low retrieval signal, but sometimes the actual answer").
+   Fixing this for real means `njac.py` stops discarding that block outright — store it as
+   separate low-priority chunks or metadata instead of dropping it — tracked in `PLAN.md`'s
+   backlog, not fixed here.
+2. **The negative-control confidence threshold doesn't hold as tightly under re-measurement.**
+   Phase 1's original verification (see above) measured one negative control at 0.34, well below
+   genuine matches (0.82, 0.67), and floated "~0.4-0.5" as a viable don't-answer threshold. Running
+   both negative controls now, one scores 0.58 — still comfortably below genuine matches
+   (0.62-0.84) but above that originally suggested cutoff. The test uses a looser 0.65 bound
+   rather than the original ~0.4-0.5 guess. This is a useful correction: the original number was a
+   single measurement from one negative control, not a validated threshold, and re-measuring
+   against both showed real variance.
+
+**Also surfaced a corpus-drift bug while first running this test against live storage**: a
+duplicate `njac_5_23.pdf` (the full combined UCC document, 1141 chunks) was sitting in the live
+dev corpus even though Phase 1's "Decision: exclude the full combined UCC document from the
+index" (above) explicitly excluded it. Root cause not investigated further (most likely
+re-added during some later manual re-ingest cycle after one of the schema-change resets), but the
+fix was straightforward: deleted it via `DELETE /documents/{doc_id}`, restoring the documented
+17-document/1463-chunk baseline from Phase 2's close-out. Worth remembering next time a full
+`rm -rf backend/storage/` + re-ingest happens: re-ingest from the same 17-file set Phase 2
+verified against, not from a different file listing that happens to include the excluded
+combined document.
+
+### Configurable default Top-K
+
+`QuestionBox.tsx` hardcoded `top_k=5` for every query. Added `VITE_DEFAULT_TOP_K` to
+`frontend/.env`, now defaulting to 3. Reasoning: a higher top-k means a longer context block sent
+to the LLM, and CPU-backed Ollama queries (see "LLM provider switch" above, and the GPU note in
+`PLAN.md`'s backlog — this dev machine's GTX 1060 3GB can't meaningfully accelerate the 8B model)
+could already take on the order of minutes at top-k=5; defaulting lower keeps the common case
+faster without removing the option to raise it.
+
+### `/upload` moved to an async background job
+
+The single biggest item carried in Phase 1's "Known limitations" since the start of this log:
+`/upload` ran the full extract/chunk/embed/store pipeline inline in the request handler, blocking
+the connection for as long as that took (seconds to minutes for large documents). Fixed by
+moving the slow part into a FastAPI `BackgroundTask` rather than reaching for an external queue
+(Celery/RQ, as Phase 1's note had originally guessed) — at this project's single-process,
+single-machine scale, FastAPI's built-in background-task mechanism (which runs a sync task via
+its threadpool, off the event loop) is enough, and avoids a Redis/broker dependency.
+
+- **Router split**: `POST /upload` now does only the cheap synchronous checks —
+  `ingestion.validate_upload()` (duplicate-hash lookup, supersedes-target existence/is-latest
+  validation, factored out of what used to be the start of `ingest_document()`) — before
+  returning `202 {job_id, status: "queued"}` immediately. Those checks stay synchronous
+  deliberately: they're cheap (a couple of DB lookups, no file parsing), so rejecting a bad
+  request immediately with 409/422 is better UX than making the caller poll a job just to learn
+  it failed validation.
+- **`jobs` table** (new, in `vector_store.py`'s schema) tracks `status`
+  (`queued`/`processing`/`done`/`error`), the eventual `result` (the same shape `/upload` used to
+  return directly) or `error` message, keyed by `job_id`. `GET /upload/jobs/{job_id}` polls it.
+- **Frontend**: `UploadComponent` now polls the job endpoint (800ms interval, via a new
+  `pollJobUntilDone()` helper) and shows a `Processing…` state between "Uploading…" and
+  "Done"/"Error".
+- **Tests**: all backend tests that upload a document through the HTTP layer (not just
+  `test_upload.py` — `test_documents.py`, `test_query.py`, `test_summary.py`,
+  `test_integration.py` all had inline `client.post("/upload", ...)` calls asserting a synchronous
+  200) were updated to use a new `conftest.py` helper, `upload_and_wait()`, which POSTs, then GETs
+  the job status and returns its result. No polling loop needed in tests: Starlette's `TestClient`
+  runs `BackgroundTasks` to completion as part of handling the request, so the job is already
+  done/errored by the time `client.post()` returns.
+- **Verified** against a real running server (`RAG_STORAGE_DIR` pointed at an isolated temp
+  directory, not the dev corpus): `POST /upload` returned instantly with `status: "queued"`,
+  polling showed the transition through `processing` to `done` with the full ingestion result.
+
+**Bug found immediately after, via manual UI testing**: `DocumentList.tsx`'s "Replace" action
+(added in Phase 2's "Document versioning" work) still awaited `uploadDocument()` as if it
+resolved with the finished ingestion result — a leftover from before this change. Since
+`uploadDocument()` now resolves immediately with `{job_id, status: "queued"}`, Replace was
+refreshing the document list right after the job was *enqueued*, before the background task had
+actually superseded the old document — the swap (old doc's `is_latest` flipping to 0, new doc
+appearing) hadn't necessarily happened yet by the time the UI showed "done." Fixed by factoring
+`pollJobUntilDone()` out of `UploadComponent` into a shared `frontend/src/uploadJob.ts` and having
+`handleReplace()` await it too, only refreshing (or showing a "Replace failed" message) once the
+job actually resolves. Two new tests added to `DocumentList.test.tsx` covering the success and
+job-error paths — neither existed before this bug was found, since the original synchronous
+`/upload` made a real "still pending" state impossible to observe.
+
+**Verified manually end-to-end via direct browser automation**, against isolated storage (not the
+dev corpus): uploaded a document, replaced it with a second file, confirmed the row updated to
+the new file and the "Processing…" state was visible during the job; checked "Show superseded
+versions" and confirmed the old version showed the `superseded` badge with no Replace action;
+attempted a second Replace with duplicate content and confirmed a red "Replace failed: This file
+was already ingested as ..." message appeared with the table correctly left unchanged (no
+premature refresh — the exact bug just fixed). All test documents deleted and both servers torn
+down afterward.
