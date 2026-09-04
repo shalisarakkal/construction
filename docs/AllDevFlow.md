@@ -36,11 +36,15 @@ dream.md scope" below, in the order it was built.
 ### What exists
 
 - `NJ/links.md` — all links scraped from the NJ DCA "Codes & Regs" page
-  (nj.gov/dca/codes/codreg/current.shtml).
+  (nj.gov/dca/codes/codreg/current.shtml). **Updated 2026-09-04** with a second scrape of
+  `ucc.shtml` (the actual N.J.A.C. 5:23 subchapter index — see "Resolved 2026-09-04 — corpus is
+  now complete" a few sections below, under Phase 1's "Final ingestion results", for why
+  `current.shtml` alone wasn't enough).
 - `NJ/pdfs/` — NJ regulation PDFs (public government publications, legally redistributable).
   7 downloaded directly; the remaining individual NJAC subchapter files were manually added
-  later. 18 files total on disk as of Phase 1 completion — see "Final ingestion results" below
-  for which ones are actually indexed.
+  later (see "Resolved 2026-09-04" below for the two added that day). 18 files total on disk as
+  of Phase 1 completion — see "Final ingestion results" below for which ones are actually
+  indexed; 20 files as of 2026-09-04.
 - **Deliberately NOT downloaded**: IBC/IRC/IECC/IMC/IFGC (ICC), the base NEC (NFPA), the
   National Standard Plumbing Code (IAPMO), ASHRAE 90.1. NJ adopts these *by reference* but they
   are copyrighted publications distributed through the standards bodies' own licensed platforms,
