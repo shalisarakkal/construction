@@ -1187,3 +1187,86 @@ pre-existing table-chunk limitation rather than chased further here -- 2 chunks 
 breadcrumb stripping, lettered subsection splitting, numbered sub-item splitting, History
 separated from dropped Annotations, and the no-Annotations copyright-footer regression. Backend
 tests: 91 passed + 0 xfailed → **99 passed + 0 xfailed**.
+
+### Visual/design QA pass
+
+Phase 4's last open item -- functionality had been verified throughout, but nobody had reviewed
+layout, responsiveness, or dark mode in a real browser session. Also folded in a decision from
+earlier the same day: replacing `DocumentList`'s native `window.confirm()` delete confirmation
+with an in-app modal (see the dedicated note further up this file for that discussion -- not a
+correctness bug, just a visual-consistency gap, deliberately deferred here rather than fixed
+standalone).
+
+**Tooling limitation hit immediately**: neither `resize_window` nor real OS-level dark mode could
+be reliably driven in the automation environment used for this session -- `resize_window` reported
+success but `window.innerWidth` never actually changed (confirmed via direct JS inspection), and
+there's no dedicated dark-mode-emulation tool available. Worked around both: dark mode was
+verified by injecting a `<style>` block setting the exact CSS custom property values the real
+`@media (prefers-color-scheme: dark)` block sets (copied directly from `index.css`, kept in sync
+with it -- not a separate simulated palette); narrow viewports were verified by constraining
+`#root`'s width via injected CSS and checking `scrollWidth` vs `clientWidth` directly rather than
+trusting the screenshot alone.
+
+**Found and fixed 3 real issues:**
+
+1. **Dark mode: hardcoded confidence badge colors.** A scan for hex colors not routed through a
+   CSS variable turned up exactly three lines -- `.confidence-high/medium/low` in `App.css` -- the
+   *only* hardcoded colors in the entire stylesheet; everything else already properly used the
+   `--text`/`--bg`/`--accent`/etc. variable system. Visually confirmed via the dark-mode injection
+   technique above: these badges rendered as bright pastel light-mode chips (`#dcfce7`, `#fef3c7`,
+   `#fee2e2` backgrounds) floating on the near-black dark background, jarringly inconsistent with
+   every other badge in the app (the `njac`/`generic` chunker badges, the `superseded` badge, and
+   the `llm-badge` all correctly used theme variables already and adapted fine). Fixed by adding
+   `--confidence-high-bg`/`-fg`, `--confidence-medium-bg`/`-fg`, `--confidence-low-bg`/`-fg`
+   variables to `index.css` (light defaults matching the original hardcoded values exactly, dark
+   overrides using deep desaturated backgrounds with bright foreground text -- the same treatment
+   `--warn-bg` already used for the low-confidence warning box, which is why that box already
+   looked correct in dark mode without needing any fix). While auditing this, also noticed
+   `--danger` and `--success` (used as plain text color in several places -- error messages, the
+   Delete link, "Done"/"Error" upload-item status text) had no dark-mode override either; they were
+   technically legible against the dark background but visibly muted. Brightened both for dark mode
+   (`#b91c1c` → `#f87171`, `#15803d` → `#4ade80`) for consistency, verified by zooming into the
+   real "Delete" link before and after -- clearly more legible after.
+2. **Responsive: `DocumentList`'s document table had no scroll container.** Confirmed via direct
+   `scrollWidth`/`clientWidth` inspection (not just a visual guess) that at a simulated 390px
+   width, `#root`'s `scrollWidth` (517px) exceeded its `clientWidth` (386px) -- the table (a plain
+   HTML `<table>` with five columns: Title, Chunker, Chunks, Ingested, actions) had nowhere to go
+   but overflow, with no way for a user to reach the cut-off Replace/Delete actions. Fixed by
+   wrapping the table in a new `.table-scroll { overflow-x: auto }` div with `min-width: 600px` on
+   the table itself, so it becomes independently horizontally scrollable within its own area
+   instead of breaking the page's layout containment -- the same "wide content scrolls in its own
+   container, the page body never does" principle used elsewhere for exactly this class of problem.
+   Verified the fix numerically too: `#root`'s `scrollWidth` and `clientWidth` became exactly
+   equal (386 == 386) after the fix, with the `.table-scroll` div itself correctly showing the
+   overflow (`scrollWidth: 600` vs `clientWidth: 338`, `overflow-x: auto`). Also added
+   `flex-wrap: wrap` to `.app-header`, since the title and tab nav crowded/overlapped at the same
+   narrow width without it.
+3. **Delete confirmation modal.** New `ConfirmDialog.tsx` component, reusing the existing
+   `.modal`/`.modal-overlay` pattern already established by `ChunkPreviewModal` for visual
+   consistency (same rounded card, same overlay treatment) rather than inventing a new modal
+   style. Adds `role="dialog"`, `aria-modal`, and `aria-labelledby` (accessibility niceties
+   `ChunkPreviewModal` doesn't have either -- deliberately not retrofitted there, to keep this
+   change scoped to the one component actually being touched) and closes on Escape or an overlay
+   click, in addition to explicit Cancel/Confirm buttons. `DocumentList.handleDelete` was split
+   into `setPendingDelete(doc)` (opens the dialog) and `confirmDelete()` (does the actual delete,
+   called from the dialog's `onConfirm`).
+
+**A mistake made and corrected earlier the same session, surfaced again here for context**: this
+pass is when the "browser automation can't observe native dialogs" limitation (documented in the
+click-to-browse section above) was first discovered -- an accidental real click on a live file
+input during that unrelated investigation is what led to figuring out `resize_window` and
+dark-mode emulation would need workarounds here too, before this pass properly began.
+
+**Verified live against the running app** (real dev corpus, non-destructively): opened the delete
+dialog on a real document and confirmed it renders as a themed in-app modal, not a native browser
+`confirm()` popup -- title "Delete document", the exact same message text the old `window.confirm`
+used, a "Cancel" button and a red "Delete" button; clicked Cancel and confirmed the document list
+was unchanged (no delete occurred). Confirmed the wide desktop layout is pixel-identical to before
+the `flex-wrap` header change (only affects narrow widths, as intended).
+
+**Tests**: 7 new `ConfirmDialog.test.tsx` cases (renders title/message/confirm label, calls
+`onConfirm`, calls `onCancel` on the Cancel button/overlay click/Escape, does *not* call `onCancel`
+on an inside click, applies the danger class). `DocumentList.test.tsx`'s three `window.confirm`-
+mocked delete tests rewritten to exercise the real dialog via `role="dialog"` + `within()` queries
+instead (one of them now also asserts `window.confirm` was never called), plus one new test for
+the Escape-to-cancel path. Frontend tests: 43 passed → **51 passed**.

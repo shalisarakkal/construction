@@ -33,14 +33,9 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 - [x] Q&A page (question box, answer card, citations, chunk previews + modal)
 - [x] Summary page (document picker, generate summary, truncation notice, download `.txt`)
 - [x] Document versioning UI (Replace action, superseded badge, show-all-versions toggle)
-- [ ] Visual/design QA pass (layout, responsiveness, dark mode) — functionality is verified,
-      appearance has not been formally reviewed. Scope includes: replacing `DocumentList`'s
-      native `window.confirm()` delete confirmation with an in-app modal — user decision
-      2026-09-04, folded into this pass rather than done as a standalone fix. Not a correctness
-      bug (native confirm is a defensible choice for a destructive action — synchronous, can't be
-      styled into a misclickable state, users already trust it), just a visual-consistency gap:
-      it doesn't respect the app's theme/dark-mode and can't show styled/rich content (e.g. a
-      bolded doc title).
+- [x] Visual/design QA pass (layout, responsiveness, dark mode) — see "Beyond dream.md scope"
+      below for what was found and fixed (dark-mode confidence badges, a responsive table
+      overflow, and the delete-confirmation modal).
 
 ## Phase 5 — Scaling + Optional Cloud
 
@@ -63,7 +58,7 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       were found and fixed — see below): chunkers (njac.py and statute.py), extractors (including
       real Tesseract OCR), LLM provider switching (mocked), vector_store internals, all 4 routers,
       full upload→query→summary→delete integration lifecycles, and the eval-set runner below
-- [x] Frontend test suite — 43 Vitest + React Testing Library tests, including regression tests
+- [x] Frontend test suite — 51 Vitest + React Testing Library tests, including regression tests
       for stale-state UI bugs found and fixed along the way (3 originally, plus the async-upload
       Replace-flow bug below)
 - [x] Git repository initialized and pushed to GitHub (`shalisarakkal/construction`)
@@ -232,6 +227,34 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       - Tests: 8 new `test_statute_chunker.py` cases (detection, basic chunking, boilerplate/
         breadcrumb stripping, lettered/numbered splitting, History-separated-from-dropped-
         Annotations, the no-Annotations copyright-footer regression). Backend tests: 91 → 99 passed.
+- [x] **Visual/design QA pass** — verified in a real browser (dark mode simulated via CSS variable
+      injection, since neither `resize_window` nor OS-level dark mode could be reliably driven in
+      the automation environment used; narrow viewports simulated via a constrained container
+      since window resize had no effect there either). Found and fixed 3 real issues:
+      1. **Dark mode**: `.confidence-high/medium/low` badges (`AnswerCard`) were the only hardcoded
+         colors in the whole stylesheet — no dark-mode override, so they rendered as bright
+         light-mode chips floating on the dark background, inconsistent with every other themed
+         badge. Fixed with new `--confidence-*-bg`/`--confidence-*-fg` CSS variables (light
+         defaults + dark overrides, following the same pattern `--warn-bg` already used). Also
+         brightened `--danger`/`--success` for dark mode (`#b91c1c`/`#15803d` were technically
+         legible against the dark background but noticeably muted; now `#f87171`/`#4ade80`).
+      2. **Responsive**: `DocumentList`'s document table had no scroll container — confirmed via
+         `scrollWidth`/`clientWidth` inspection that it overflowed its parent at narrow widths with
+         no way to see the cut-off columns. Wrapped in `.table-scroll { overflow-x: auto }` so the
+         table scrolls within its own area instead of breaking the page layout. Also gave
+         `.app-header` `flex-wrap` so the title and tab nav don't crowd each other at narrow widths.
+      3. **Delete confirmation modal**: replaced `DocumentList`'s native `window.confirm()` with a
+         new `ConfirmDialog` component (user decision 2026-09-04, folded into this pass) — reuses
+         the existing `.modal`/`.modal-overlay` pattern from `ChunkPreviewModal` for visual
+         consistency, adds `role="dialog"`/`aria-labelledby` and Escape-to-cancel (neither of which
+         `ChunkPreviewModal` had either, not retrofitted there to keep this change scoped).
+      - Verified live: dark-mode badge fix confirmed by injecting the exact dark CSS values and
+        comparing before/after; table overflow fix confirmed by checking `#root`'s `scrollWidth`
+        now equals its `clientWidth` at a simulated 390px width; delete dialog opened and cancelled
+        against the real corpus (non-destructive) — themed correctly, no native browser dialog.
+      - Tests: 8 new (`ConfirmDialog.test.tsx`) + `DocumentList.test.tsx`'s delete tests rewritten
+        to exercise the in-app dialog instead of mocking `window.confirm`, plus a new Escape-key
+        test. Frontend tests: 43 → 51 passed.
 
 ## Out of scope (explicit decisions, not oversights)
 

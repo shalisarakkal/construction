@@ -11,6 +11,20 @@
   --warn-bg: #fef3c7;
   --success: #15803d;
 
+  /* Confidence badges (AnswerCard) -- kept as their own bg/fg pairs rather
+     than reusing --success/--warn/--danger, since a badge needs a light
+     tinted background behind readable text, not just a text color. See
+     docs/AllDevFlow.md's visual QA pass, 2026-09-04: these were hardcoded
+     hex with no dark-mode override, the only hardcoded colors in the
+     stylesheet -- looked like bright light-mode chips floating on the dark
+     background, inconsistent with every other themed badge. */
+  --confidence-high-bg: #dcfce7;
+  --confidence-high-fg: #15803d;
+  --confidence-medium-bg: #fef3c7;
+  --confidence-medium-fg: #92400e;
+  --confidence-low-bg: #fee2e2;
+  --confidence-low-fg: #b91c1c;
+
   font: 15px/1.5 system-ui, "Segoe UI", Roboto, sans-serif;
   color-scheme: light dark;
   color: var(--text);
@@ -27,6 +41,15 @@
     --accent: #60a5fa;
     --accent-bg: rgba(96, 165, 250, 0.12);
     --warn-bg: #422006;
+    --danger: #f87171;
+    --success: #4ade80;
+
+    --confidence-high-bg: #052e16;
+    --confidence-high-fg: #4ade80;
+    --confidence-medium-bg: #422006;
+    --confidence-medium-fg: #fbbf24;
+    --confidence-low-bg: #450a0a;
+    --confidence-low-fg: #f87171;
   }
 }
 

@@ -10,6 +10,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
   padding: 20px 24px 0;
 }
 
@@ -137,6 +139,14 @@
 
 /* Document table */
 
+.table-scroll {
+  overflow-x: auto;
+}
+
+.doc-table {
+  min-width: 600px;
+}
+
 .doc-table th, .doc-table td {
   text-align: left;
   padding: 6px 10px;
@@ -222,9 +232,9 @@
   border-radius: 999px;
 }
 
-.confidence-high { background: #dcfce7; color: #15803d; }
-.confidence-medium { background: #fef3c7; color: #92400e; }
-.confidence-low { background: #fee2e2; color: #b91c1c; }
+.confidence-high { background: var(--confidence-high-bg); color: var(--confidence-high-fg); }
+.confidence-medium { background: var(--confidence-medium-bg); color: var(--confidence-medium-fg); }
+.confidence-low { background: var(--confidence-low-bg); color: var(--confidence-low-fg); }
 
 .llm-badge {
   background: var(--bg-alt);
@@ -405,6 +415,44 @@
 .modal-refs {
   font-size: 13px;
   margin-top: 8px;
+}
+
+.confirm-dialog {
+  max-width: 420px;
+}
+
+.confirm-message {
+  margin: 12px 0 20px;
+  line-height: 1.5;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.confirm-actions button {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.confirm-cancel {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.confirm-button {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+.confirm-button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
 }
 
 /* Summary */

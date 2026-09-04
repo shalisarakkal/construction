@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { deleteDocument, listDocuments, uploadDocument } from "../api";
 import { pollJobUntilDone } from "../uploadJob";
+import { ConfirmDialog } from "./ConfirmDialog";
 import type { DocumentSummary } from "../types";
 
 interface Props {
@@ -18,6 +19,7 @@ export function DocumentList({ onLoaded, refreshKey }: Props) {
   const [replaceError, setReplaceError] = useState<string | null>(null);
   const [showAllVersions, setShowAllVersions] = useState(false);
   const [localRefresh, setLocalRefresh] = useState(0);
+  const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -32,11 +34,10 @@ export function DocumentList({ onLoaded, refreshKey }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey, localRefresh, showAllVersions]);
 
-  async function handleDelete(doc: DocumentSummary) {
-    const confirmed = window.confirm(
-      `Delete "${doc.title}"? This removes all ${doc.chunk_count} of its chunks from the index. This cannot be undone.`
-    );
-    if (!confirmed) return;
+  async function confirmDelete() {
+    const doc = pendingDelete;
+    if (!doc) return;
+    setPendingDelete(null);
 
     setDeletingId(doc.doc_id);
     setDeleteError(null);
@@ -89,52 +90,64 @@ export function DocumentList({ onLoaded, refreshKey }: Props) {
       {docs.length === 0 ? (
         <p className="muted">No documents processed yet.</p>
       ) : (
-        <table className="doc-table">
-          <thead>
-            <tr>
-              <th>Title</th>
-              <th>Chunker</th>
-              <th>Chunks</th>
-              <th>Ingested</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {docs.map((d) => (
-              <tr key={d.doc_id} className={d.is_latest ? "" : "doc-row-superseded"}>
-                <td>
-                  {d.title}
-                  {!d.is_latest && <span className="badge badge-superseded">superseded</span>}
-                </td>
-                <td>
-                  <span className={`badge badge-${d.chunker_used}`}>{d.chunker_used}</span>
-                </td>
-                <td>{d.chunk_count}</td>
-                <td>{new Date(d.created_at).toLocaleString()}</td>
-                <td className="doc-row-actions">
-                  {d.is_latest && (
-                    <label className="link-button">
-                      {replacingId === d.doc_id ? "Replacing…" : "Replace"}
-                      <input
-                        type="file"
-                        className="visually-hidden-input"
-                        disabled={replacingId === d.doc_id}
-                        onChange={(e) => handleReplace(d, e.target.files)}
-                      />
-                    </label>
-                  )}
-                  <button
-                    className="link-button danger"
-                    onClick={() => handleDelete(d)}
-                    disabled={deletingId === d.doc_id}
-                  >
-                    {deletingId === d.doc_id ? "Deleting…" : "Delete"}
-                  </button>
-                </td>
+        <div className="table-scroll">
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Chunker</th>
+                <th>Chunks</th>
+                <th>Ingested</th>
+                <th></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {docs.map((d) => (
+                <tr key={d.doc_id} className={d.is_latest ? "" : "doc-row-superseded"}>
+                  <td>
+                    {d.title}
+                    {!d.is_latest && <span className="badge badge-superseded">superseded</span>}
+                  </td>
+                  <td>
+                    <span className={`badge badge-${d.chunker_used}`}>{d.chunker_used}</span>
+                  </td>
+                  <td>{d.chunk_count}</td>
+                  <td>{new Date(d.created_at).toLocaleString()}</td>
+                  <td className="doc-row-actions">
+                    {d.is_latest && (
+                      <label className="link-button">
+                        {replacingId === d.doc_id ? "Replacing…" : "Replace"}
+                        <input
+                          type="file"
+                          className="visually-hidden-input"
+                          disabled={replacingId === d.doc_id}
+                          onChange={(e) => handleReplace(d, e.target.files)}
+                        />
+                      </label>
+                    )}
+                    <button
+                      className="link-button danger"
+                      onClick={() => setPendingDelete(d)}
+                      disabled={deletingId === d.doc_id}
+                    >
+                      {deletingId === d.doc_id ? "Deleting…" : "Delete"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete document"
+          message={`Delete "${pendingDelete.title}"? This removes all ${pendingDelete.chunk_count} of its chunks from the index. This cannot be undone.`}
+          confirmLabel="Delete"
+          danger
+          onConfirm={confirmDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
       )}
     </>
   );

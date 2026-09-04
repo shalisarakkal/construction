@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
@@ -88,42 +88,64 @@ describe("DocumentList", () => {
     await waitFor(() => expect(api.listDocuments).toHaveBeenLastCalledWith(true));
   });
 
-  it("deletes a document after confirmation and refreshes the list", async () => {
+  it("shows an in-app confirmation dialog (not window.confirm) before deleting", async () => {
     vi.mocked(api.listDocuments).mockResolvedValue([makeDoc()]);
     vi.mocked(api.deleteDocument).mockResolvedValue(undefined);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, "confirm");
     const user = userEvent.setup();
     render(<DocumentList refreshKey={0} />);
     await waitFor(() => expect(screen.getByText("njac_5_23_1.pdf")).toBeInTheDocument());
 
     await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/delete "njac_5_23_1\.pdf"/i)).toBeInTheDocument();
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(api.deleteDocument).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(api.deleteDocument).toHaveBeenCalledWith("doc1"));
     // localRefresh bump triggers a second listDocuments call.
     await waitFor(() => expect(api.listDocuments).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("does not delete when the confirmation dialog is cancelled", async () => {
     vi.mocked(api.listDocuments).mockResolvedValue([makeDoc()]);
-    vi.spyOn(window, "confirm").mockReturnValue(false);
     const user = userEvent.setup();
     render(<DocumentList refreshKey={0} />);
     await waitFor(() => expect(screen.getByText("njac_5_23_1.pdf")).toBeInTheDocument());
 
     await user.click(screen.getByRole("button", { name: "Delete" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
 
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.deleteDocument).not.toHaveBeenCalled();
+  });
+
+  it("closes the confirmation dialog on Escape without deleting", async () => {
+    vi.mocked(api.listDocuments).mockResolvedValue([makeDoc()]);
+    const user = userEvent.setup();
+    render(<DocumentList refreshKey={0} />);
+    await waitFor(() => expect(screen.getByText("njac_5_23_1.pdf")).toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(api.deleteDocument).not.toHaveBeenCalled();
   });
 
   it("shows a delete error message when deletion fails", async () => {
     vi.mocked(api.listDocuments).mockResolvedValue([makeDoc()]);
     vi.mocked(api.deleteDocument).mockRejectedValue(new Error("locked"));
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     const user = userEvent.setup();
     render(<DocumentList refreshKey={0} />);
     await waitFor(() => expect(screen.getByText("njac_5_23_1.pdf")).toBeInTheDocument());
 
     await user.click(screen.getByRole("button", { name: "Delete" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(screen.getByText(/delete failed: locked/i)).toBeInTheDocument());
   });
