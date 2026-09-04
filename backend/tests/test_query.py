@@ -1,5 +1,6 @@
 from app import llm
 from app.routers.query import build_context_block
+from conftest import upload_and_wait
 
 
 def test_query_with_no_documents_returns_empty_result(client, monkeypatch):
@@ -26,11 +27,10 @@ def test_query_retrieves_relevant_chunk_without_llm(client, monkeypatch):
     # testable without any LLM dependency at all."
     monkeypatch.setattr(llm, "is_configured", lambda: False)
 
-    upload = client.post(
-        "/upload",
+    upload_and_wait(
+        client,
         files={"file": ("egress.txt", b"Exit doors shall swing in the direction of egress travel.", "text/plain")},
     )
-    assert upload.status_code == 200
 
     resp = client.post("/query", json={"question": "Which direction should exit doors swing?", "top_k": 3})
 
@@ -57,11 +57,10 @@ def test_query_synthesizes_answer_when_llm_configured(client, monkeypatch):
 
     monkeypatch.setattr(llm, "synthesize_answer", fake_synthesize_answer)
 
-    upload = client.post(
-        "/upload",
+    upload_and_wait(
+        client,
         files={"file": ("egress.txt", b"Exit doors shall swing in the direction of egress travel.", "text/plain")},
     )
-    assert upload.status_code == 200
 
     resp = client.post("/query", json={"question": "Which direction should exit doors swing?"})
 
@@ -77,11 +76,10 @@ def test_query_top_k_limits_chunk_count(client, monkeypatch):
     monkeypatch.setattr(llm, "is_configured", lambda: False)
 
     for i in range(3):
-        resp = client.post(
-            "/upload",
+        upload_and_wait(
+            client,
             files={"file": (f"doc{i}.txt", f"Fire safety requirement number {i} for exit corridors.".encode(), "text/plain")},
         )
-        assert resp.status_code == 200
 
     resp = client.post("/query", json={"question": "fire safety exit corridor requirements", "top_k": 2})
 

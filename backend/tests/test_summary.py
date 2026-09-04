@@ -1,4 +1,5 @@
 from app import llm
+from conftest import upload_and_wait
 
 # Single sentence, 14 words -- repeated to build a document whose chunks
 # exceed summary.py's MAX_SUMMARY_WORDS (6000), to exercise truncation.
@@ -35,12 +36,11 @@ def test_summary_success_not_truncated(client, monkeypatch):
 
     monkeypatch.setattr(llm, "synthesize_summary", fake_synthesize_summary)
 
-    upload = client.post(
-        "/upload",
+    upload = upload_and_wait(
+        client,
         files={"file": ("egress.txt", b"Exit doors shall swing in the direction of egress travel.", "text/plain")},
     )
-    assert upload.status_code == 200
-    doc_id = upload.json()["doc_id"]
+    doc_id = upload["doc_id"]
 
     resp = client.post(f"/documents/{doc_id}/summary")
 
@@ -60,13 +60,12 @@ def test_summary_truncates_when_over_word_budget(client, monkeypatch):
     monkeypatch.setattr(llm, "synthesize_summary", lambda title, context_block: "Truncated summary.")
 
     big_text = (_SENTENCE + " ") * 500  # ~7000 words, over the 6000-word cap
-    upload = client.post(
-        "/upload",
+    upload = upload_and_wait(
+        client,
         files={"file": ("big_doc.txt", big_text.encode(), "text/plain")},
     )
-    assert upload.status_code == 200
-    doc_id = upload.json()["doc_id"]
-    total_chunks = upload.json()["chunk_count"]
+    doc_id = upload["doc_id"]
+    total_chunks = upload["chunk_count"]
     assert total_chunks > 1  # sanity check the doc actually produced multiple chunks
 
     resp = client.post(f"/documents/{doc_id}/summary")

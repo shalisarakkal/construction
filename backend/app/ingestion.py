@@ -1,7 +1,9 @@
 """Ties together extraction -> chunker selection -> embedding -> storage.
-Runs synchronously in the request handler for Phase 1 (flagged in
-docs/AllDevFlow.md backlog: production should move this to a background job,
-since PDF parsing + embedding can take seconds to minutes per document)."""
+
+ingest_document() is the slow part (PDF parsing + embedding can take seconds
+to minutes per document) and runs inside a FastAPI BackgroundTask kicked off
+by routers/upload.py, not inline in the request handler -- see that router
+and vector_store.py's jobs table for the job-status polling this enables."""
 
 import hashlib
 import shutil
@@ -27,8 +29,12 @@ class DuplicateDocumentError(ValueError):
         )
 
 
-def ingest_document(file_bytes: bytes, filename: str, title: str | None,
-                     supersedes_doc_id: str | None = None) -> dict:
+def validate_upload(file_bytes: bytes, supersedes_doc_id: str | None = None) -> str:
+    """Fast synchronous prechecks (duplicate-hash + supersedes-target
+    validation) that don't require the slow extract/chunk/embed pipeline, so
+    /upload can reject a bad request immediately with 409/422 instead of
+    making the caller poll a job just to learn it failed validation. Returns
+    the content hash so ingest_document doesn't have to hash the file twice."""
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     existing = vector_store.find_document_by_hash(content_hash)
     if existing:
@@ -43,6 +49,13 @@ def ingest_document(file_bytes: bytes, filename: str, title: str | None,
                 f"Cannot replace {supersedes_doc_id}: it has already been superseded by a "
                 "newer version. Replace the current latest version of this document instead."
             )
+
+    return content_hash
+
+
+def ingest_document(file_bytes: bytes, filename: str, title: str | None,
+                     supersedes_doc_id: str | None = None) -> dict:
+    content_hash = validate_upload(file_bytes, supersedes_doc_id)
 
     doc_id = uuid.uuid4().hex[:12]
     doc_dir = settings.documents_dir / doc_id / "raw"

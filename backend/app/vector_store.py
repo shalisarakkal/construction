@@ -45,6 +45,16 @@ CREATE TABLE IF NOT EXISTS chunks (
     references_json TEXT NOT NULL,
     faiss_row_id INTEGER UNIQUE NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    result_json TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -226,6 +236,40 @@ def get_document_chunks(doc_id: str) -> list[dict]:
 def _row_to_chunk(row: sqlite3.Row) -> dict:
     d = dict(row)
     d["references"] = json.loads(d.pop("references_json"))
+    return d
+
+
+def create_job(job_id: str, filename: str):
+    """Registers a queued ingest job -- see routers/upload.py, which now
+    returns 202 + job_id immediately and runs the actual extract/chunk/embed
+    pipeline in a FastAPI BackgroundTask, since that pipeline can take
+    seconds to minutes per document (docs/AllDevFlow.md backlog)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO jobs (job_id, status, filename, result_json, error, created_at, updated_at)
+               VALUES (?, 'queued', ?, NULL, NULL, ?, ?)""",
+            (job_id, filename, now, now),
+        )
+
+
+def update_job(job_id: str, status: str, result: dict | None = None, error: str | None = None):
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = ?, result_json = ?, error = ?, updated_at = ? WHERE job_id = ?",
+            (status, json.dumps(result) if result is not None else None, error,
+             datetime.now(timezone.utc).isoformat(), job_id),
+        )
+
+
+def get_job(job_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    result_json = d.pop("result_json")
+    d["result"] = json.loads(result_json) if result_json else None
     return d
 
 

@@ -32,6 +32,22 @@ export interface UploadResponse {
   supersedes_doc_id: string | null;
 }
 
+export interface UploadAcceptedResponse {
+  job_id: string;
+  status: "queued";
+  filename: string;
+}
+
+export type UploadJobStatus = "queued" | "processing" | "done" | "error";
+
+export interface JobStatusResponse {
+  job_id: string;
+  status: UploadJobStatus;
+  filename: string;
+  result: UploadResponse | null;
+  error: string | null;
+}
+
 export interface RetrievedChunk {
   chunk: ChunkRecord;
   doc_title: string;

@@ -36,6 +36,20 @@ class UploadResponse(BaseModel):
     supersedes_doc_id: str | None = None
 
 
+class UploadAcceptedResponse(BaseModel):
+    job_id: str
+    status: Literal["queued"]
+    filename: str
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: Literal["queued", "processing", "done", "error"]
+    filename: str
+    result: UploadResponse | None = None
+    error: str | None = None
+
+
 class QueryRequest(BaseModel):
     question: str
     top_k: int = 5

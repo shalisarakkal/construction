@@ -1,4 +1,5 @@
 from app import llm
+from conftest import upload_and_wait
 
 
 def test_full_document_lifecycle(client, monkeypatch):
@@ -6,12 +7,11 @@ def test_full_document_lifecycle(client, monkeypatch):
     -> confirm it's gone everywhere, exercising all four routers together."""
     monkeypatch.setattr(llm, "is_configured", lambda: False)
 
-    upload = client.post(
-        "/upload",
+    upload = upload_and_wait(
+        client,
         files={"file": ("egress.txt", b"Exit doors shall swing in the direction of egress travel.", "text/plain")},
     )
-    assert upload.status_code == 200
-    doc_id = upload.json()["doc_id"]
+    doc_id = upload["doc_id"]
 
     listed = client.get("/documents").json()
     assert [d["doc_id"] for d in listed] == [doc_id]
@@ -45,23 +45,21 @@ def test_replaced_version_is_excluded_from_query_but_kept_in_history(client, mon
     documents behavior that no single-router test exercises together."""
     monkeypatch.setattr(llm, "is_configured", lambda: False)
 
-    v1 = client.post(
-        "/upload",
+    v1 = upload_and_wait(
+        client,
         files={"file": ("policy_v1.txt", b"Handrail height shall be 34 inches minimum.", "text/plain")},
     )
-    assert v1.status_code == 200
-    v1_id = v1.json()["doc_id"]
+    v1_id = v1["doc_id"]
 
     before = client.post("/query", json={"question": "What is the minimum handrail height?"})
     assert before.json()["chunks"][0]["doc_title"] == "policy_v1.txt"
 
-    v2 = client.post(
-        "/upload",
+    v2 = upload_and_wait(
+        client,
         files={"file": ("policy_v2.txt", b"Handrail height shall be 36 inches minimum.", "text/plain")},
         data={"supersedes": v1_id},
     )
-    assert v2.status_code == 200
-    v2_id = v2.json()["doc_id"]
+    v2_id = v2["doc_id"]
 
     after = client.post("/query", json={"question": "What is the minimum handrail height?"})
     titles = [c["doc_title"] for c in after.json()["chunks"]]

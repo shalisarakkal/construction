@@ -1,7 +1,8 @@
+from conftest import upload_and_wait
+
+
 def _upload(client, filename, content):
-    resp = client.post("/upload", files={"file": (filename, content.encode(), "text/plain")})
-    assert resp.status_code == 200
-    return resp.json()
+    return upload_and_wait(client, files={"file": (filename, content.encode(), "text/plain")})
 
 
 def test_list_documents_empty(client):
@@ -29,13 +30,11 @@ def test_list_documents_returns_uploaded_docs_newest_first(client):
 
 def test_list_documents_default_hides_superseded_versions(client):
     v1 = _upload(client, "policy_v1.txt", "Policy version one.")
-    v2_resp = client.post(
-        "/upload",
+    v2 = upload_and_wait(
+        client,
         files={"file": ("policy_v2.txt", b"Policy version two.", "text/plain")},
         data={"supersedes": v1["doc_id"]},
     )
-    assert v2_resp.status_code == 200
-    v2 = v2_resp.json()
 
     default_resp = client.get("/documents")
     default_titles = {d["title"] for d in default_resp.json()}
@@ -58,12 +57,11 @@ def test_get_versions_returns_404_for_unknown_document(client):
 
 def test_get_versions_returns_chain_oldest_first(client):
     v1 = _upload(client, "policy_v1.txt", "Policy version one.")
-    v2_resp = client.post(
-        "/upload",
+    v2 = upload_and_wait(
+        client,
         files={"file": ("policy_v2.txt", b"Policy version two.", "text/plain")},
         data={"supersedes": v1["doc_id"]},
     )
-    v2 = v2_resp.json()
 
     resp = client.get(f"/documents/{v1['doc_id']}/versions")
 
@@ -119,5 +117,4 @@ def test_delete_frees_up_content_hash_for_reupload(client):
 
     # Same content, previously rejected as a 409 duplicate, should now be
     # accepted since the original document was deleted.
-    resp = client.post("/upload", files={"file": ("egress.txt", content.encode(), "text/plain")})
-    assert resp.status_code == 200
+    upload_and_wait(client, files={"file": ("egress.txt", content.encode(), "text/plain")})

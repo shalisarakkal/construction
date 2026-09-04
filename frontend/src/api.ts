@@ -2,8 +2,9 @@ import type {
   ApiErrorBody,
   DocumentSummary,
   DocumentSummaryResponse,
+  JobStatusResponse,
   QueryResponse,
-  UploadResponse,
+  UploadAcceptedResponse,
 } from "./types";
 
 export const API_BASE = "http://127.0.0.1:8000";
@@ -22,13 +23,17 @@ async function unwrap<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function uploadDocument(file: File, supersedes?: string): Promise<UploadResponse> {
+export function uploadDocument(file: File, supersedes?: string): Promise<UploadAcceptedResponse> {
   const form = new FormData();
   form.append("file", file);
   if (supersedes) form.append("supersedes", supersedes);
   return fetch(`${API_BASE}/upload`, { method: "POST", body: form }).then((r) =>
-    unwrap<UploadResponse>(r)
+    unwrap<UploadAcceptedResponse>(r)
   );
+}
+
+export function getUploadJob(jobId: string): Promise<JobStatusResponse> {
+  return fetch(`${API_BASE}/upload/jobs/${jobId}`).then((r) => unwrap<JobStatusResponse>(r));
 }
 
 export function listDocuments(includeAll = false): Promise<DocumentSummary[]> {

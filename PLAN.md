@@ -84,11 +84,17 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
         note (~0.34, "don't answer below ~0.4-0.5") doesn't hold as tightly under re-measurement —
         one of the two negative controls now scores 0.58, still well below genuine matches
         (0.62-0.84) but above the originally suggested cutoff. Test uses a looser 0.65 bound.
+- [x] `/upload` moved to a background job — the router now does only the cheap synchronous checks
+      (duplicate-hash, supersedes-target validity) before returning `202 {job_id, status: "queued"}`;
+      the slow extract/chunk/embed/store pipeline runs in a FastAPI `BackgroundTasks` call (off the
+      event loop, via its threadpool) tracked in a new `jobs` SQLite table, polled via
+      `GET /upload/jobs/{job_id}`. Frontend's `UploadComponent` polls that endpoint (800ms interval)
+      and shows a `Processing…` state. Verified against a real running server (isolated storage
+      dir, not the dev corpus): POST returned instantly with `status: "queued"`, transitioned to
+      `processing`, then `done` with the full result once ingestion finished.
 
 ## Known issues / backlog
 
-- [ ] `/upload` runs synchronously in the request handler — should move to a background job for
-      large documents
 - [ ] FAISS index only ever grows; delete/supersede leave orphaned vectors behind (acceptable at
       current corpus size, ~1,400 chunks)
 - [ ] No schema migration tooling — every schema change so far has required a full storage wipe +

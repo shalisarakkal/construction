@@ -1,7 +1,8 @@
 import { useId, useState } from "react";
-import { uploadDocument } from "../api";
+import { getUploadJob, uploadDocument } from "../api";
+import type { JobStatusResponse } from "../types";
 
-type FileStatus = "queued" | "uploading" | "done" | "error";
+type FileStatus = "queued" | "uploading" | "processing" | "done" | "error";
 
 interface FileEntry {
   key: string;
@@ -12,6 +13,24 @@ interface FileEntry {
 
 interface Props {
   onUploaded: () => void;
+}
+
+const POLL_INTERVAL_MS = 800;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// /upload now just enqueues a background ingest job (the actual PDF
+// parsing + embedding can take seconds to minutes) and returns a job_id
+// immediately -- poll /upload/jobs/{job_id} until it leaves the
+// queued/processing states.
+async function pollJobUntilDone(jobId: string): Promise<JobStatusResponse> {
+  for (;;) {
+    const job = await getUploadJob(jobId);
+    if (job.status === "done" || job.status === "error") return job;
+    await sleep(POLL_INTERVAL_MS);
+  }
 }
 
 export function UploadComponent({ onUploaded }: Props) {
@@ -37,15 +56,31 @@ export function UploadComponent({ onUploaded }: Props) {
         prev.map((e) => (e.key === key ? { ...e, status: "uploading" } : e))
       );
       try {
-        const result = await uploadDocument(file);
+        const accepted = await uploadDocument(file);
         setEntries((prev) =>
-          prev.map((e) =>
-            e.key === key
-              ? { ...e, status: "done", detail: `${result.chunk_count} chunks (${result.chunker_used})` }
-              : e
-          )
+          prev.map((e) => (e.key === key ? { ...e, status: "processing" } : e))
         );
-        onUploaded();
+
+        const job = await pollJobUntilDone(accepted.job_id);
+        if (job.status === "done" && job.result) {
+          const result = job.result;
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.key === key
+                ? { ...e, status: "done", detail: `${result.chunk_count} chunks (${result.chunker_used})` }
+                : e
+            )
+          );
+          onUploaded();
+        } else {
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.key === key
+                ? { ...e, status: "error", detail: job.error ?? "Processing failed" }
+                : e
+            )
+          );
+        }
       } catch (err) {
         setEntries((prev) =>
           prev.map((e) =>
@@ -95,7 +130,8 @@ export function UploadComponent({ onUploaded }: Props) {
               <span className="upload-item-name">{e.name}</span>
               <span className="upload-item-status">
                 {e.status === "queued" && "Queued"}
-                {e.status === "uploading" && "Processing…"}
+                {e.status === "uploading" && "Uploading…"}
+                {e.status === "processing" && "Processing…"}
                 {e.status === "done" && `Done — ${e.detail}`}
                 {e.status === "error" && `Error — ${e.detail}`}
               </span>
