@@ -98,6 +98,34 @@ def test_delete_document_returns_false_for_unknown_doc():
     assert vector_store.delete_document("does-not-exist") is False
 
 
+def test_compact_index_drops_orphaned_vectors_and_keeps_live_chunks_searchable():
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc Two", _unit_vector(1), "hash2")
+    vector_store.delete_document("doc1")  # leaves doc1's vector orphaned in FAISS
+
+    before_ntotal = vector_store._load_or_create_index().ntotal
+    assert before_ntotal == 2  # both vectors still physically present
+
+    report = vector_store.compact_index()
+
+    assert report == {"before": 2, "after": 1, "chunks_remapped": 1}
+    assert vector_store._load_or_create_index().ntotal == 1
+
+    results = vector_store.search(_unit_vector(1), top_k=5)
+    titles = [doc_title for _chunk, doc_title, _score in results]
+    assert titles == ["Doc Two"]
+
+
+def test_compact_index_is_a_noop_on_an_already_compact_index():
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+
+    report = vector_store.compact_index()
+
+    assert report == {"before": 1, "after": 1, "chunks_remapped": 1}
+    results = vector_store.search(_unit_vector(0), top_k=5)
+    assert [doc_title for _chunk, doc_title, _score in results] == ["Doc One"]
+
+
 def test_get_document_versions_returns_empty_for_unknown_doc():
     assert vector_store.get_document_versions("does-not-exist") == []
 

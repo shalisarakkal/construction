@@ -9,6 +9,7 @@ chunk metadata.
 """
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -170,6 +171,57 @@ def delete_document(doc_id: str) -> bool:
         conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
     return True
+
+
+def compact_index() -> dict:
+    """Rebuilds the FAISS index containing only the vectors backing
+    currently-live chunk rows, dropping every orphaned vector accumulated by
+    past deletes/supersedes/schema-reset re-ingests -- the tradeoff
+    documented (and deferred) in delete_document()'s docstring. Measured on
+    this project's dev corpus before ever running: 3,035 vectors in the
+    index for only 1,463 live chunks -- more than half dead weight, silently
+    shrinking the effective top_k of every query (see docs/AllDevFlow.md,
+    2026-09-04).
+
+    Reconstructs each live vector directly from the existing flat index
+    (`IndexFlatIP` supports `reconstruct()` natively -- no re-embedding
+    needed) and reassigns sequential `faiss_row_id`s to match the new,
+    compacted index. Intended to be run offline via
+    `backend/scripts/compact_faiss_index.py`, not exposed as an HTTP
+    endpoint -- this is a maintenance operation, not something a request
+    should trigger.
+
+    Ordering matters for safety: the new index is fully built and written to
+    a temp file, and only swapped into place with a single `os.replace()`
+    as the very last step, after the SQLite row-id updates have already
+    committed -- so the existing (larger but valid) index file stays intact
+    for as long as possible if anything goes wrong partway through. Run with
+    the backend stopped."""
+    old_index = _load_or_create_index()
+    before = old_index.ntotal
+
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT chunk_id, faiss_row_id FROM chunks ORDER BY faiss_row_id"
+        ).fetchall()
+
+    new_index = faiss.IndexFlatIP(settings.embedding_dim)
+    id_updates = []
+    for row in rows:
+        vector = old_index.reconstruct(int(row["faiss_row_id"]))
+        new_row_id = new_index.ntotal
+        new_index.add(np.expand_dims(vector, axis=0))
+        id_updates.append((new_row_id, row["chunk_id"]))
+
+    tmp_path = settings.faiss_index_path.parent / (settings.faiss_index_path.name + ".compacting")
+    faiss.write_index(new_index, str(tmp_path))
+
+    with _connect() as conn:
+        conn.executemany("UPDATE chunks SET faiss_row_id = ? WHERE chunk_id = ?", id_updates)
+
+    os.replace(tmp_path, settings.faiss_index_path)
+
+    return {"before": before, "after": new_index.ntotal, "chunks_remapped": len(id_updates)}
 
 
 def list_documents(include_all: bool = False) -> list[dict]:

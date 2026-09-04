@@ -32,6 +32,18 @@ STANDARD_REF_RE = re.compile(r"ASME\s+A1[0-9]\.\d(?:-\d{4})?|ICC\s+A117\.1")
 
 MAX_CHUNK_WORDS = 500
 
+# A numbered item below this is treated as too small/context-free to embed
+# usefully alone (e.g. "Addition of rope equalizers") and gets merged with
+# its neighbors. At or above it, an item is normally already a complete,
+# independently-citable provision -- merging it further risks diluting its
+# embedding with unrelated neighboring items and hurting retrieval for
+# anything specific to it. Found empirically: a fence-permit-exemption item
+# (~30 words) bundled into one 472-word chunk with four unrelated permit
+# exemptions (gas metering, signs, sheds, lead abatement) scored too low to
+# make the top results for an on-topic fence question -- see
+# docs/AllDevFlow.md's "chunking dilution" finding, 2026-09-04.
+MIN_GROUP_WORDS = 20
+
 NJAC_DETECT_RE = re.compile(r"N\.J\.A\.C\.\s*5:23|New Jersey Administrative Code")
 
 PAGE_BOILERPLATE_PATTERNS = [
@@ -98,8 +110,19 @@ def _split_on(regex: re.Pattern, text: str) -> list[str]:
     idxs = [m.start() for m in regex.finditer(text)]
     if not idxs:
         return [text]
+    pieces = []
+    if idxs[0] > 0:
+        # Text before the first match (e.g. "(b) The following are exceptions
+        # from (a) above:" ahead of numbered item "1.") used to be silently
+        # dropped here -- confirmed real content loss against the live corpus
+        # (njac_5_23_2.pdf's actual 5:23-2.14(b) intro sentence was missing
+        # from the ingested chunk). Keep it as a leading piece instead; the
+        # caller merges it into its first real item group rather than losing
+        # it. See docs/AllDevFlow.md, 2026-09-04.
+        pieces.append(text[: idxs[0]].strip())
     idxs.append(len(text))
-    return [text[idxs[i]: idxs[i + 1]].strip() for i in range(len(idxs) - 1)]
+    pieces.extend(text[idxs[i]: idxs[i + 1]].strip() for i in range(len(idxs) - 1))
+    return pieces
 
 
 def _chunk_lettered_piece(doc_id: str, citation_num: str, title: str, header: str, piece: str) -> list[dict]:
@@ -124,14 +147,21 @@ def _chunk_lettered_piece(doc_id: str, citation_num: str, title: str, header: st
     chunks = []
     group: list[str] = []
     group_words = 0
-    group_start_num = None
 
     def flush():
-        nonlocal group, group_words, group_start_num
+        nonlocal group, group_words
         if not group:
             return
-        num_match = re.match(r"^(\d+)\.", group[0])
-        start_num = num_match.group(1) if num_match else group_start_num or "?"
+        # A group can start with intro text ahead of the first numbered item
+        # (see _split_on's leading-piece handling above) -- scan the whole
+        # group for the first real numbered item rather than assuming
+        # group[0] is one, so that intro text doesn't produce a "?" citation.
+        start_num = "?"
+        for member in group:
+            num_match = re.match(r"^(\d+)\.", member)
+            if num_match:
+                start_num = num_match.group(1)
+                break
         item_citation = f"{sub_citation}.{start_num}" if len(group) == 1 else f"{sub_citation}.{start_num}+"
         text = f"{header} {item_citation}\n" + "\n".join(group)
         chunks.append(_make_chunk(doc_id, f"N.J.A.C. {item_citation}", title, text))
@@ -140,7 +170,10 @@ def _chunk_lettered_piece(doc_id: str, citation_num: str, title: str, header: st
 
     for item in numbered_pieces:
         words = len(item.split())
-        if group_words + words > MAX_CHUNK_WORDS and group:
+        # Close the current group before adding this item if it's already
+        # substantial enough to stand alone (MIN_GROUP_WORDS) or would
+        # overflow the hard cap -- either way, don't dilute it further.
+        if group and (group_words >= MIN_GROUP_WORDS or group_words + words > MAX_CHUNK_WORDS):
             flush()
         group.append(item)
         group_words += words

@@ -832,3 +832,87 @@ attempted a second Replace with duplicate content and confirmed a red "Replace f
 was already ingested as ..." message appeared with the table correctly left unchanged (no
 premature refresh — the exact bug just fixed). All test documents deleted and both servers torn
 down afterward.
+
+### A real retrieval miss, found via manual Q&A testing on the live dev corpus
+
+The user asked the running app (real dev corpus, not a test fixture) *"Any special requirement to
+build a fence around the property?"* and got back *"Not enough information."* The immediate
+question was whether that's correct — the corpus genuinely lacking fence content — or a retrieval
+bug. Investigated by inspecting what `/query` actually retrieved, not just trusting the answer
+text:
+
+- Grepped every live chunk's text directly (`SELECT ... WHERE lower(text) LIKE '%fence%'`) and
+  found the corpus **does** have a directly relevant provision: `N.J.A.C. 5:23-2.14(b)` item 9,
+  "A permit shall not be required for fences six feet or less in height. This exception does not
+  apply to barriers surrounding public or private swimming pools." So this was a retrieval miss,
+  not a corpus gap.
+- That chunk didn't even appear in the top 9 of a `top_k=20` request (which itself only returned
+  9 results — see below). Inspected the chunk directly: it was `5:23-2.14(b).5+`, a 472-word chunk
+  bundling **five unrelated** permit exemptions (gas-utility metering, signs, lead abatement,
+  utility sheds, *and* fences — items 5 through 9) into one embedding. The fence sentence is ~30
+  of those 472 words; averaging its embedding with four unrelated topics diluted it enough that an
+  unrelated-but-narrowly-focused chunk (an outdoor-maze permit exemption, sharing surface language
+  like "height" and "permit") outscored it.
+- **Root cause**: `_chunk_lettered_piece`'s numbered-item grouping (Phase 1 above) grows a group
+  of consecutive numbered items up to the 500-word cap regardless of whether those items are
+  topically related. That heuristic was designed and validated against one specific real case —
+  §12.8(b)'s 33 "minor work" items (`NJ/eval/chunking_strategy.md` section 4.2), which *are*
+  topically homogeneous and individually tiny ("Addition of rope equalizers" — genuinely
+  context-free alone). Applying the same heuristic to `5:23-2.14(b)`'s list — which is
+  topically *heterogeneous*, each item a complete independent provision — actively hurt retrieval
+  instead of helping it. The original design reasoning was sound for the case it was built
+  against; it just didn't generalize to every numbered list in the corpus, and nothing before now
+  had surfaced a concrete failure to reveal that.
+- **Fix**: added `MIN_GROUP_WORDS = 20` (`app/chunkers/njac.py`) — a numbered item at or above
+  that size closes its own chunk rather than continuing to absorb whatever comes next; only items
+  smaller than that (the "Addition of rope equalizers" case this grouping was actually built for)
+  still merge with their neighbors. `MAX_CHUNK_WORDS` (500) is unchanged as the upper safety cap.
+- **A second, more serious bug found while fixing the first**: `_split_on()` (shared by both the
+  lettered-subsection split and the numbered-item split) silently **dropped any text before its
+  first regex match**. Checked whether this was just a synthetic-test artifact or real: it is
+  real. `njac_5_23_2.pdf`'s actual source text for `5:23-2.14(b)` reads *"(b) The following are
+  exceptions from (a) above:\n1. Ordinary maintenance..."* — but the live chunk
+  `N.J.A.C. 5:23-2.14(b).1+` started directly at "1. Ordinary maintenance...", missing that intro
+  sentence entirely. This wasn't specific to this one section — it affects every lettered piece or
+  section that has any intro text before its first numbered item or first lettered subsection,
+  likely dozens of places across the corpus, and has been silently losing content since Phase 1.
+  Fixed: `_split_on()` now keeps text before the first match as a leading piece instead of
+  discarding it; `_chunk_lettered_piece`'s `flush()` was also fixed to scan the whole group for the
+  first real numbered item when deriving a chunk's citation number (it used to assume `group[0]`
+  was always a numbered item, which broke once a leading intro piece could be `group[0]`).
+- **Also surfaced, investigating why `top_k=20` only returned 9 results**: the dev corpus's FAISS
+  index held **3,035 vectors for only 1,463 live chunks** — 52% orphaned, accumulated from every
+  past delete/supersede/schema-reset re-ingest cycle (the tradeoff documented, and deferred, in
+  `delete_document()`'s docstring in Phase 2 above). `vector_store.search()` silently drops any
+  FAISS hit that doesn't resolve to a live chunk, so a request for the top 20 nearest neighbors
+  can — and did — return far fewer once roughly half of them turn out to be dead rows. This was
+  quietly shrinking the effective top_k of *every* query, not just this one. Added
+  `vector_store.compact_index()` + `backend/scripts/compact_faiss_index.py`: rebuilds the index
+  from only live chunks, reconstructing each vector directly from the existing flat index (FAISS's
+  `IndexFlatIP.reconstruct()` — no re-embedding needed) and reassigning sequential row ids. Writes
+  to a temp file and swaps it in with `os.replace()` only after the SQLite row-id updates commit,
+  so the existing (larger but valid) index stays intact for as long as possible if anything goes
+  wrong partway through. Intended to run offline, backend stopped — not exposed as an HTTP
+  endpoint, since this is a maintenance operation, not something a request should trigger.
+- **Applied both chunking fixes to the live dev corpus**: backed up `backend/storage/` first, then
+  did the usual full wipe + re-ingest of the same 17-file baseline (see Phase 1's "Final ingestion
+  results" and Phase 2's close-out above) — same established pattern this project has used for
+  every prior schema/logic change, since there's still no migration tooling. Result: **1,463 →
+  2,055 chunks** (finer-grained, as expected from no longer over-merging heterogeneous items), and
+  since it's a fresh index, `compact_index()` wasn't needed this time — 0 orphaned vectors by
+  construction. `compact_index()` remains available for the next time deletes/supersedes
+  accumulate orphans without a full re-ingest.
+- **Verified the fix against the original failing question**: re-ran *"Any special requirement to
+  build a fence around the property?"* against the live (re-ingested) corpus. The fence provision
+  (`N.J.A.C. 5:23-2.14(b).9`, now its own chunk) scored 0.567 and was the **top** retrieved
+  result — previously it hadn't even placed in the top 9 of a top-20 request. The LLM's answer
+  now correctly cites it: *"There is a reference to fences in section 9 of N.J.A.C. 5:23-2.14...
+  a permit is not required for fences six feet or less in height, unless they surround a public
+  or private swimming pool."*
+- **Tests**: `test_chunkers.py` — replaced the old grouping test (which exercised exactly the
+  behavior just proven harmful) with one confirming substantial items each get their own chunk,
+  added one confirming genuinely tiny items still group together (the original, still-valid
+  motivating case), and a regression test for `_split_on()`'s leading-text bug.
+  `test_vector_store.py` — two new tests for `compact_index()` (drops a real orphan and keeps
+  live chunks searchable; no-ops cleanly on an already-compact index). Full suite: 85 passed + 1
+  xfailed (up from 82), all passing before the live corpus was touched.

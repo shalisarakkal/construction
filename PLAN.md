@@ -100,11 +100,35 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       `frontend/src/uploadJob.ts`) and only refreshes once it completes; verified manually in a
       real browser against isolated storage (success path, and the 409-duplicate error path
       leaving the table unchanged).
+- [x] Fixed a real retrieval miss found via manual Q&A testing ("Any special requirement to build
+      a fence around the property?" wrongly answered "Not enough information" even though the
+      corpus has a directly relevant provision). Root-caused to two bugs in `app/chunkers/njac.py`:
+      1. Numbered-item grouping bundled topically-unrelated permit exemptions into one chunk up to
+         the 500-word cap, diluting a short but substantive item's embedding with 4 unrelated
+         neighbors. Fixed with `MIN_GROUP_WORDS = 20`: an item that size or larger closes its own
+         chunk instead of continuing to absorb subsequent unrelated items; genuinely tiny
+         (context-free) items still group together as before.
+      2. `_split_on()` silently dropped any text before the first regex match — confirmed as real
+         content loss on the live corpus (`njac_5_23_2.pdf`'s actual "(b) The following are
+         exceptions from (a) above:" intro sentence was missing from the ingested chunk). Fixed to
+         keep that text as a leading piece, merged into the first real item's group instead of
+         lost.
+      Re-ingested the full 17-document corpus with the fix: 1,463 → 2,055 chunks (finer-grained,
+      as expected). Verified the original failing question now retrieves the correct chunk
+      (`N.J.A.C. 5:23-2.14(b).9`, score 0.567, previously outside the top 9 of a top-20 request)
+      and the LLM's answer now correctly cites the real fence-permit-exemption provision.
+- [x] Added `vector_store.compact_index()` + `backend/scripts/compact_faiss_index.py` — rebuilds
+      the FAISS index from only live chunks' vectors (reconstructed from the existing flat index,
+      no re-embedding needed), dropping orphaned vectors from past deletes/supersedes/schema-reset
+      re-ingests. Found via the fence-question investigation: the dev corpus's FAISS index held
+      3,035 vectors for only 1,463 live chunks (52% dead weight), silently shrinking every query's
+      effective top_k. The corpus reingest above already produced a fresh, orphan-free index
+      (2,055 vectors == 2,055 live chunks), so `compact_index()` wasn't needed this time, but is
+      now available as reusable maintenance tooling for future deletes/supersedes without a full
+      re-ingest.
 
 ## Known issues / backlog
 
-- [ ] FAISS index only ever grows; delete/supersede leave orphaned vectors behind (acceptable at
-      current corpus size, ~1,400 chunks)
 - [ ] No schema migration tooling — every schema change so far has required a full storage wipe +
       re-ingest
 - [ ] Amendment-history text isn't indexed (see eval-set finding above) — would need `njac.py` to
@@ -112,3 +136,7 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       instead of dropping it entirely
 - [ ] This dev machine's GPU (GTX 1060 3GB) can't meaningfully accelerate the 8B Ollama model —
       CPU-only (`RAG_OLLAMA_NUM_GPU=0`) is currently faster than automatic partial GPU offload
+- [ ] The `(a)`/`(b)`-only "intro" chunk citation falls back to a cosmetic `"?"` placeholder (e.g.
+      `N.J.A.C. 5:23-2.3(a).?`) when a lettered piece's oversized intro text has no numbered item
+      of its own — harmless (chunk is still fully indexed and searchable) but not a clean citation
+      for a user-facing answer; a real fix would derive a better label than `"?"` for that case

@@ -60,7 +60,14 @@ def test_njac_chunk_splits_oversized_section_on_lettered_subsections():
     assert all(c["word_count"] <= 500 for c in chunks)
 
 
-def test_njac_chunk_regroups_numbered_items_when_lettered_piece_still_oversized():
+def test_njac_chunk_gives_each_substantial_numbered_item_its_own_chunk():
+    # Each item here (200 words) is well above MIN_GROUP_WORDS, so each gets
+    # its own chunk rather than being merged with its neighbors -- merging
+    # substantial, topically-independent items dilutes their embeddings (see
+    # MIN_GROUP_WORDS's docstring in app/chunkers/njac.py for the real-world
+    # finding that motivated this). "intro text." ahead of item 1 merges into
+    # item 1's chunk (hence ".1+") rather than being dropped -- see
+    # _split_on's leading-piece handling, also fixed alongside MIN_GROUP_WORDS.
     item = " ".join(["item"] * 200)
     text = (
         "N.J.A.C. 5:23-2.2\n\n"
@@ -71,14 +78,52 @@ def test_njac_chunk_regroups_numbered_items_when_lettered_piece_still_oversized(
 
     chunks = njac_chunk("doc1", text)
 
-    # Items 1+2 fit together under the 500-word cap and get grouped into one
-    # chunk (citation suffixed "+"); item 3 alone forms the next chunk -- see
-    # _chunk_lettered_piece's regrouping logic in app/chunkers/njac.py.
     assert [c["citation"] for c in chunks] == [
         "N.J.A.C. 5:23-2.2(a).1+",
+        "N.J.A.C. 5:23-2.2(a).2",
         "N.J.A.C. 5:23-2.2(a).3",
     ]
+    assert "intro text" in chunks[0]["text"]
     assert all(c["word_count"] <= 500 for c in chunks)
+
+
+def test_split_on_preserves_text_before_first_match():
+    # Regression test: _split_on() used to silently drop any text before the
+    # first regex match entirely (confirmed as real content loss on the live
+    # corpus -- njac_5_23_2.pdf's actual "(b) The following are exceptions
+    # from (a) above:" intro sentence was missing from the ingested chunk).
+    from app.chunkers.njac import NUMBERED_SUB_RE, _split_on
+
+    pieces = _split_on(NUMBERED_SUB_RE, "The following are exceptions:\n1. First.\n2. Second.")
+
+    assert pieces == ["The following are exceptions:", "1. First.", "2. Second."]
+
+
+def test_njac_chunk_still_groups_genuinely_tiny_numbered_items():
+    # Items below MIN_GROUP_WORDS (e.g. a short "Addition of rope
+    # equalizers"-style line) are too context-free to embed usefully alone,
+    # so they should still be merged with their neighbors up to
+    # MIN_GROUP_WORDS -- this is the original motivating case for grouping
+    # at all (see NJ/eval/chunking_strategy.md section 4.2).
+    filler = " ".join(["requirement"] * 600)  # forces the lettered piece to split further
+    text = (
+        "N.J.A.C. 5:23-2.3\n\n"
+        "§ 5:23-2.3 Tiny Items Section\n"
+        f"(a) {filler}\n"
+        "1. short one.\n2. short two.\n3. short three.\n4. short four.\n"
+        "End of Document"
+    )
+
+    chunks = njac_chunk("doc1", text)
+
+    citations = [c["citation"] for c in chunks]
+    # The oversized intro paragraph is its own chunk; the four tiny items
+    # get grouped together (each ~2 words) rather than each becoming its
+    # own near-empty chunk.
+    assert citations[-1] == "N.J.A.C. 5:23-2.3(a).1+"
+    assert len(chunks) == 2
+    assert "short one" in chunks[-1]["text"]
+    assert "short four" in chunks[-1]["text"]
 
 
 def test_dedupe_chunk_ids_disambiguates_collisions():

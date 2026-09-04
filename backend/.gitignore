@@ -1,5 +1,6 @@
 .venv/
 storage/
+storage.bak-*/
 __pycache__/
 *.pyc
 .env
