@@ -54,10 +54,12 @@ describe("QuestionBox", () => {
     expect(onAsk).toHaveBeenCalledWith("A question", 7);
   });
 
-  it("disables the input and shows 'Asking…' while disabled", () => {
+  it("disables the question textarea, top-k input, and button while disabled", () => {
     render(<QuestionBox onAsk={vi.fn()} disabled={true} />);
 
     expect(screen.getByRole("button", { name: "Asking…" })).toBeDisabled();
+    expect(screen.getByPlaceholderText(/ask a question/i)).toBeDisabled();
+    expect(screen.getByLabelText(/top-k/i)).toBeDisabled();
   });
 
   it("initializes the Top-K field from VITE_DEFAULT_TOP_K", () => {

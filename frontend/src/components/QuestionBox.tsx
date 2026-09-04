@@ -16,6 +16,7 @@ export function QuestionBox({ onAsk, disabled }: Props) {
   const [topK, setTopK] = useState(DEFAULT_TOP_K);
 
   function submit() {
+    if (disabled) return;
     const q = question.trim();
     if (!q) return;
     onAsk(q, topK);
@@ -31,6 +32,7 @@ export function QuestionBox({ onAsk, disabled }: Props) {
         }}
         placeholder="Ask a question about the ingested regulations… (Ctrl/Cmd+Enter to submit)"
         rows={3}
+        disabled={disabled}
       />
       <div className="question-box-controls">
         <label>
@@ -41,6 +43,7 @@ export function QuestionBox({ onAsk, disabled }: Props) {
             max={20}
             value={topK}
             onChange={(e) => setTopK(Number(e.target.value))}
+            disabled={disabled}
           />
         </label>
         <button onClick={submit} disabled={disabled || !question.trim()}>
