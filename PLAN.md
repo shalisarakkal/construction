@@ -142,6 +142,32 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       amendments to those codes, not the base code text — consistent with Phase 0's decision not to
       download the copyrighted base codes themselves.
 
+- [x] **Amendment-history text is now indexed.** `njac.py`'s `HISTORY_SPLIT_RE` used to discard
+      every section's `History:` block entirely (amendment dates, N.J.R. citations, and
+      plain-English change descriptions — e.g. "R.2014 d.149, effective October 6, 2014...Updated
+      the fee amounts"). Added `_chunk_history_text()`: indexes each section's history as its own
+      `chunk_type: "njac_history"` chunk (citation suffixed `... History`, or `... History (N)` for
+      sections whose history is too long for one chunk — up to 1,901 words for the most-amended
+      section found, `5:23-4.20`). Kept separate from operative-text chunks rather than merged in,
+      so a regulatory-text query's embedding isn't diluted by decades of unrelated amendment dates,
+      and a "when was this amended" query gets a chunk that's *entirely* history, not diluted by
+      substantive rule text either.
+      - **Found and fixed a second bug in the process**: the trailing "Annotations / Notes /
+        Chapter Notes / NEW JERSEY ADMINISTRATIVE CODE / Copyright..." footer (present at the end
+        of literally every section in the corpus — verified 291/291) was leaking straight into
+        operative_text's indexed, retrievable content whenever a section had *no* History block to
+        split it off first. Found live in 22 already-ingested chunks (e.g. `N.J.A.C. 5:23-1.2`).
+        Now stripped from both operative_text and the new history chunks.
+      - `backend/tests/test_eval_set.py`'s q15 ("When was the registration fee section last
+        amended...") was a documented `xfail` for exactly this gap — now passes for real; the
+        `xfail` marking was removed rather than kept as a stale pass/fail toggle.
+      - Re-ingested the full 19-document corpus: 2,108 → 2,418 chunks (310 of them `njac_history`).
+        Verified live against the real corpus: `N.J.A.C. 5:23-12.5`'s history chunk is now the
+        **top** retrieved result (score 0.740) for the eval set's amendment-history question, and
+        `/query` returns a correct, cited answer ("...amended by R.2014 d.149, effective October 6,
+        2014") instead of the old "not indexed" gap.
+      - Backend tests: 85 → 89 passed (+3 new chunker tests, q15's `xfail` → real pass).
+
 ## Out of scope (explicit decisions, not oversights)
 
 - N.J.A.C. 5:21 (Residential Site Improvement Standards / RSIS) — a different NJAC chapter
@@ -153,12 +179,17 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 
 - [ ] No schema migration tooling — every schema change so far has required a full storage wipe +
       re-ingest
-- [ ] Amendment-history text isn't indexed (see eval-set finding above) — would need `njac.py` to
-      stop discarding the `History:` block, store it as separate low-priority chunks or metadata
-      instead of dropping it entirely
 - [ ] This dev machine's GPU (GTX 1060 3GB) can't meaningfully accelerate the 8B Ollama model —
       CPU-only (`RAG_OLLAMA_NUM_GPU=0`) is currently faster than automatic partial GPU offload
 - [ ] The `(a)`/`(b)`-only "intro" chunk citation falls back to a cosmetic `"?"` placeholder (e.g.
       `N.J.A.C. 5:23-2.3(a).?`) when a lettered piece's oversized intro text has no numbered item
       of its own — harmless (chunk is still fully indexed and searchable) but not a clean citation
       for a user-facing answer; a real fix would derive a better label than `"?"` for that case
+- [ ] A single oversized numbered item has no further split level — found while verifying the
+      amendment-history fix: `N.J.A.C. 5:23-4.20(c).2` is one 2,038-word chunk, well over the
+      500-word cap, because `_chunk_lettered_piece` only groups/splits *between* numbered items,
+      never subdivides one item that's already oversized on its own (the level-4 "sentence-level
+      fallback" `NJ/eval/chunking_strategy.md` originally sketched for this case was never actually
+      implemented). Pre-existing, not something this session's chunking work introduced or fixed —
+      likely hurts retrieval the same way the fence-question dilution bug did, just from being too
+      large/unfocused rather than too small/diluted.

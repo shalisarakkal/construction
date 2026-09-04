@@ -126,6 +126,102 @@ def test_njac_chunk_still_groups_genuinely_tiny_numbered_items():
     assert "short four" in chunks[-1]["text"]
 
 
+def test_njac_chunk_indexes_history_as_a_separate_chunk():
+    # Regression test: the History block used to be discarded entirely (see
+    # docs/AllDevFlow.md's eval-set finding -- "when was this amended"
+    # questions had a real, un-indexed answer in the source PDF).
+    text = (
+        "N.J.A.C. 5:23-12.5\n\n"
+        "§ 5:23-12.5 Registration fee\n"
+        "The initial registration fee shall be $76.00.\n"
+        "History\n"
+        "HISTORY:\n"
+        "Amended by R.2014 d.149, effective October 6, 2014.\n"
+        "See: 46 N.J.R. 898(a), 46 N.J.R. 2024(a).\n"
+        "Updated the fee amounts.\n"
+        "Annotations\n"
+        "Notes\n"
+        "Chapter Notes\n"
+        "NEW JERSEY ADMINISTRATIVE CODE\n"
+        "Copyright (c) 2026 by the New Jersey Office of Administrative Law\n"
+        "End of Document"
+    )
+
+    chunks = njac_chunk("doc1", text)
+
+    citations = [c["citation"] for c in chunks]
+    assert "N.J.A.C. 5:23-12.5" in citations
+    assert "N.J.A.C. 5:23-12.5 History" in citations
+
+    operative = next(c for c in chunks if c["citation"] == "N.J.A.C. 5:23-12.5")
+    assert operative["chunk_type"] == "njac_section"
+    assert "Annotations" not in operative["text"]
+    assert "2014" not in operative["text"]
+
+    history = next(c for c in chunks if c["citation"] == "N.J.A.C. 5:23-12.5 History")
+    assert history["chunk_type"] == "njac_history"
+    assert "October 6, 2014" in history["text"]
+    assert "Updated the fee amounts" in history["text"]
+    assert "Annotations" not in history["text"]
+    assert "Copyright" not in history["text"]
+
+
+def test_njac_chunk_strips_annotations_footer_when_no_history_block():
+    # Regression test: found live in the real corpus (22 chunks, e.g.
+    # N.J.A.C. 5:23-1.2) -- a section with no History block still had the
+    # trailing Annotations/Notes/Chapter Notes/Copyright boilerplate leak
+    # straight into its indexed, retrievable operative text.
+    text = (
+        "N.J.A.C. 5:23-1.2\n\n"
+        "§ 5:23-1.2 Purpose\n"
+        "This subchapter is adopted pursuant to the Uniform Construction Code Act.\n"
+        "Annotations\n"
+        "Notes\n"
+        "Chapter Notes\n"
+        "NEW JERSEY ADMINISTRATIVE CODE\n"
+        "Copyright (c) 2026 by the New Jersey Office of Administrative Law\n"
+        "End of Document"
+    )
+
+    chunks = njac_chunk("doc1", text)
+
+    assert len(chunks) == 1
+    assert "Annotations" not in chunks[0]["text"]
+    assert "Copyright" not in chunks[0]["text"]
+    assert "Uniform Construction Code Act" in chunks[0]["text"]
+
+
+def test_njac_chunk_splits_oversized_history_into_multiple_chunks():
+    entry = (
+        "Amended by R.2000 d.100, effective January 1, 2000. "
+        "See: 30 N.J.R. 100(a), 30 N.J.R. 200(b). "
+        "Some amendment description text here to pad the word count out nicely. "
+    )
+    text = (
+        "N.J.A.C. 5:23-4.20\n\n"
+        "§ 5:23-4.20 Big Section\n"
+        "Operative text here.\n"
+        "History\n"
+        "HISTORY:\n"
+        f"{entry * 20}\n"
+        "Annotations\n"
+        "Notes\n"
+        "Chapter Notes\n"
+        "NEW JERSEY ADMINISTRATIVE CODE\n"
+        "Copyright (c) 2026\n"
+        "End of Document"
+    )
+
+    chunks = njac_chunk("doc1", text)
+
+    history_chunks = [c for c in chunks if c["chunk_type"] == "njac_history"]
+    assert len(history_chunks) > 1
+    assert all(c["word_count"] <= 500 for c in history_chunks)
+    assert [c["citation"] for c in history_chunks] == [
+        f"N.J.A.C. 5:23-4.20 History ({i + 1})" for i in range(len(history_chunks))
+    ]
+
+
 def test_dedupe_chunk_ids_disambiguates_collisions():
     chunks = [
         {"chunk_id": "doc1__5:23-1(a).1+"},

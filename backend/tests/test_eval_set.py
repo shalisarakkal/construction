@@ -60,20 +60,7 @@ def _expected_section(expected_citation: str) -> str:
 def _case_params():
     params = []
     for case in _load_cases():
-        marks = []
-        if case["type"] == "amendment-history":
-            # Known, documented limitation: app/chunkers/njac.py's
-            # HISTORY_SPLIT_RE deliberately strips each section's amendment
-            # history block before chunking/embedding (low retrieval signal
-            # -- see njac.py's module docstring), so this question's answer
-            # is not actually present in any indexed chunk. Retrieval still
-            # correctly finds the right *section* (5:23-12.5), but that's a
-            # false positive for what this case is really testing.
-            marks.append(pytest.mark.xfail(
-                reason="amendment-history text is deliberately not indexed (see app/chunkers/njac.py)",
-                strict=True,
-            ))
-        params.append(pytest.param(case, id=case["id"], marks=marks))
+        params.append(pytest.param(case, id=case["id"]))
     return params
 
 
@@ -120,10 +107,13 @@ def test_eval_case(case, elevator_subcode_corpus):
 
     if case["type"] == "amendment-history":
         # Finding the right *section* isn't the real claim here -- the
-        # question needs the amendment date/year, which HISTORY_SPLIT_RE
-        # strips out before indexing (see the xfail reason above). Checking
-        # for a year from expected_answer in the retrieved text is what
-        # actually exercises the known gap; this is expected to fail today.
+        # question needs the amendment date/year, which lives in the
+        # section's separate "njac_history" chunk (app/chunkers/njac.py's
+        # _chunk_history_text -- history used to be stripped entirely before
+        # indexing; this case was a documented xfail until that was fixed,
+        # see docs/AllDevFlow.md 2026-09-04). Checking for a year from
+        # expected_answer in the retrieved text is what actually exercises
+        # this: it fails again if history indexing ever regresses.
         years = re.findall(r"\b(?:19|20)\d{2}\b", case["expected_answer"])
         assert years, f"no year found in expected_answer to check for: {case['expected_answer']!r}"
         retrieved_text = " ".join(chunk["text"] for chunk, _title, _score in results)

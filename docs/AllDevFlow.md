@@ -792,6 +792,8 @@ This surfaced two genuine findings — the eval set had simply never run before 
    Fixing this for real means `njac.py` stops discarding that block outright — store it as
    separate low-priority chunks or metadata instead of dropping it — tracked in `PLAN.md`'s
    backlog, not fixed here.
+   **Resolved 2026-09-04** — see "Amendment-history indexing" below; q15's `xfail` is gone, it's
+   a real pass now.
 2. **The negative-control confidence threshold doesn't hold as tightly under re-measurement.**
    Phase 1's original verification (see above) measured one negative control at 0.34, well below
    genuine matches (0.82, 0.67), and floated "~0.4-0.5" as a viable don't-answer threshold. Running
@@ -960,3 +962,66 @@ text:
   `test_vector_store.py` — two new tests for `compact_index()` (drops a real orphan and keeps
   live chunks searchable; no-ops cleanly on an already-compact index). Full suite: 85 passed + 1
   xfailed (up from 82), all passing before the live corpus was touched.
+
+### Amendment-history indexing
+
+The eval-set finding above (q15's documented `xfail`) was picked up as its own piece of work:
+`njac.py`'s `HISTORY_SPLIT_RE` discarded every section's `HISTORY:` block outright before
+chunking — amendment dates, N.J.R. register citations, and the plain-English change description
+(e.g. *"Amended by R.2014 d.149, effective October 6, 2014...Updated the fee amounts"*) were never
+indexed at all, so a "when was this amended" question had no chance of a real answer regardless of
+retrieval quality.
+
+- **Design**: added `_chunk_history_text()`, indexing each section's history as its own chunk,
+  `chunk_type: "njac_history"`, citation `N.J.A.C. {section} History` (or `History (N)` for
+  sections whose history is too long for one chunk). Kept as a **separate** chunk from operative
+  text rather than appended/merged into it — same reasoning as the fence-question fix above:
+  merging unrelated content dilutes an embedding. A regulatory-text chunk shouldn't have its
+  meaning diluted by decades of amendment-log dates, and a history chunk should be *entirely*
+  history so a date/amendment query scores it highly without competing against substantive rule
+  text in the same chunk.
+- **Sizing**: most sections' history is short (median 114 words across the whole corpus) and fits
+  in one chunk. A few are not — up to 1,901 words for `5:23-4.20` (the most-amended section found,
+  spanning amendments from 1982 to a 2024 administrative correction). Unlike operative text,
+  history has no lettered/numbered structure to split on, so oversized history is split the way
+  the generic chunker splits prose: `split_sentences()` (already used by `chunkers/generic.py`,
+  reused here rather than duplicated) then grouped up to `MAX_CHUNK_WORDS`. `MIN_GROUP_WORDS`
+  (the fix above) deliberately does **not** apply here: that constant exists to stop grouping
+  *topically unrelated* items together, but consecutive amendment entries for the same section are
+  all the same topic (this section's history), so dense grouping doesn't dilute anything the way
+  it did for the numbered permit-exemption list.
+- **A second bug found and fixed in the process**: every one of this corpus's 291 real sections
+  ends with a trailing "Annotations / Notes / Chapter Notes / NEW JERSEY ADMINISTRATIVE CODE /
+  Copyright..." footer (sometimes with genuine case-law commentary mixed in under "Case Notes" —
+  left out of scope here, same reasoning as not downloading the base I-Codes: it's a different
+  kind of content than the regulation text or its amendment history). This footer used to be
+  silently swept into `operative_text` whenever a section had *no* History block to split it off
+  first (the split only happens on a `HISTORY_SPLIT_RE` match) — **found live in 22
+  already-ingested chunks** (e.g. `N.J.A.C. 5:23-1.2`, `5:23-2.1`, `5:23-12.7`), meaning this
+  boilerplate had been polluting real indexed, retrievable content since Phase 1. Fixed with
+  `ANNOTATIONS_FOOTER_RE`, stripped from both operative_text (unconditionally, since it's a no-op
+  when a History split already removed it) and the new history chunks.
+- **`test_eval_set.py` updated**: q15's `pytest.mark.xfail` removed — it now passes for real
+  rather than being a stale pass/fail toggle nobody would notice flip. Three new
+  `test_chunkers.py` tests: history indexed as a separate chunk, the Annotations-footer regression
+  (a no-History section that used to leak boilerplate), and oversized-history splitting into
+  multiple word-capped chunks.
+- **Re-ingested the full 19-document corpus**: backed up `storage/` first (same pattern as the
+  fence-question fix), full wipe + re-ingest. **2,108 → 2,418 chunks**, of which **310 are
+  `njac_history`**. Fresh index, so still 0 orphaned vectors (matches chunk count exactly).
+- **Verified against the eval set's own question and the live corpus**: in the isolated
+  single-document eval corpus, `N.J.A.C. 5:23-12.5`'s new history chunk ranked #2 (score 0.501,
+  contains both "2014" and "2009") for q15's exact question. Against the live re-ingested
+  production corpus, it ranked **#1** (score 0.740), and `/query` returned: *"...the elevator
+  registration fee section (5:23-12.5) was last amended by R.2014 d.149, effective October 6,
+  2014."* — a correct, cited answer where there was previously no indexed answer at all.
+- **Found, but explicitly not fixed here**: `N.J.A.C. 5:23-4.20(c).2` is a single 2,038-word
+  chunk — `_chunk_lettered_piece` groups/splits *between* numbered items but has no level-4 split
+  for one numbered item that's already oversized on its own.
+  `NJ/eval/chunking_strategy.md`'s original design sketched a "sentence-level fallback" for
+  exactly this case; it was never actually implemented. Pre-existing (not introduced or worsened
+  by this session's changes), and plausibly hurts retrieval the same way the fence-question
+  dilution bug did — just from an unfocused *oversized* chunk rather than a diluted merged one.
+  Tracked in `PLAN.md`'s backlog rather than fixed here, to keep this session's change scoped to
+  amendment-history indexing.
+- Backend tests: 85 passed + 1 xfailed → **89 passed + 0 xfailed**.

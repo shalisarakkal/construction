@@ -15,6 +15,8 @@ Recursive split order when a section is too large:
 
 import re
 
+from .generic import split_sentences
+
 END_OF_DOC_RE = re.compile(r"\bEnd of Document\b")
 # Subchapter number is usually pure digits (5:23-12) but some subchapters are
 # letter-suffixed (5:23-3A, 5:23-4A/4B/4C/4D) -- found via real failures on
@@ -27,6 +29,15 @@ SECTION_HEADING_RE = re.compile(rf"^§\s*({SUBCHAPTER_NUM_RE})\s+(.+)$", re.MULT
 LETTERED_SUB_RE = re.compile(r"(?m)^\(([a-z])\)\s")
 NUMBERED_SUB_RE = re.compile(r"(?m)^(\d+)\.\s")
 HISTORY_SPLIT_RE = re.compile(r"\n\s*History\s*\n", re.IGNORECASE)
+HISTORY_LABEL_RE = re.compile(r"^HISTORY:\s*\n?", re.IGNORECASE)
+# Trailing "Annotations / Notes / Chapter Notes / NEW JERSEY ADMINISTRATIVE
+# CODE / Copyright ..." boilerplate (sometimes with real case-law commentary
+# mixed in under "Case Notes") appears at the end of every real section in
+# this corpus (verified: present in all 291) -- previously silently included
+# in operative_text whenever a section had no History block to split it off
+# first (found live in 22 already-ingested chunks, e.g. N.J.A.C. 5:23-1.2).
+# Stripped from both operative_text and the History chunk below.
+ANNOTATIONS_FOOTER_RE = re.compile(r"\n\s*Annotations\s*\n.*", re.DOTALL)
 CROSSREF_RE = re.compile(rf"N\.J\.A\.C\.\s*{SUBCHAPTER_NUM_RE}(?:\([a-z0-9]+\))*")
 STANDARD_REF_RE = re.compile(r"ASME\s+A1[0-9]\.\d(?:-\d{4})?|ICC\s+A117\.1")
 
@@ -69,11 +80,12 @@ def _extract_references(text: str) -> list[str]:
     return sorted(refs)
 
 
-def _make_chunk(doc_id: str, citation: str, section_title: str, text: str) -> dict:
+def _make_chunk(doc_id: str, citation: str, section_title: str, text: str,
+                 chunk_type: str = "njac_section") -> dict:
     return {
         "chunk_id": f"{doc_id}__{citation.replace('N.J.A.C. ', '')}",
         "doc_id": doc_id,
-        "chunk_type": "njac_section",
+        "chunk_type": chunk_type,
         "citation": citation,
         "section_title": section_title,
         "page_number": None,
@@ -194,6 +206,63 @@ def _chunk_section(doc_id: str, citation_num: str, title: str, operative_text: s
     return chunks
 
 
+def _chunk_history_text(doc_id: str, citation_num: str, title: str, history_text: str) -> list[dict]:
+    """The HISTORY: block (amendment log) was previously discarded entirely
+    -- see docs/AllDevFlow.md's eval-set finding: a question like "when was
+    this amended" has a real answer in the source PDF that was never
+    indexed. Indexed here as its own low-priority chunk (chunk_type
+    "njac_history"), separate from operative_text, so it's retrievable
+    without polluting the regulatory-text embeddings.
+
+    Most sections' history is short (median 114 words across this corpus)
+    and fits in one chunk, but heavily-amended sections can be much larger
+    (up to ~1,900 words) -- unlike operative_text there's no lettered/
+    numbered structure to split on, so oversized history is split the same
+    way the generic chunker splits prose: group sentences up to
+    MAX_CHUNK_WORDS. Grouping unrelated-topic items was the bug fixed for
+    numbered items (MIN_GROUP_WORDS above) -- that doesn't apply here, since
+    consecutive amendment entries are all the same topic (this section's
+    history), so grouping them densely doesn't dilute anything."""
+    base_citation = f"N.J.A.C. {citation_num} History"
+    header = f"N.J.A.C. {citation_num} — {title} — Amendment History"
+    full_text = f"{header}\n{history_text}"
+
+    if len(full_text.split()) <= MAX_CHUNK_WORDS:
+        return [_make_chunk(doc_id, base_citation, title, full_text, chunk_type="njac_history")]
+
+    # Reserve room for the "{header} ({part})" prefix so the *final* chunk
+    # text (header included) respects MAX_CHUNK_WORDS, not just the sentence
+    # group -- word_count is measured on the full chunk text below.
+    header_budget = len(f"{header} (99)".split())
+    effective_cap = MAX_CHUNK_WORDS - header_budget
+
+    sentences = split_sentences(history_text)
+    chunks = []
+    group: list[str] = []
+    group_words = 0
+    part = 1
+
+    def flush():
+        nonlocal group, group_words, part
+        if not group:
+            return
+        citation = f"{base_citation} ({part})"
+        text = f"{header} ({part})\n" + " ".join(group)
+        chunks.append(_make_chunk(doc_id, citation, title, text, chunk_type="njac_history"))
+        part += 1
+        group = []
+        group_words = 0
+
+    for sentence in sentences:
+        words = len(sentence.split())
+        if group_words + words > effective_cap and group:
+            flush()
+        group.append(sentence)
+        group_words += words
+    flush()
+    return chunks
+
+
 def njac_chunk(doc_id: str, full_text: str) -> list[dict]:
     raw_sections = _split_into_raw_sections(full_text)
     all_chunks: list[dict] = []
@@ -212,8 +281,19 @@ def njac_chunk(doc_id: str, full_text: str) -> list[dict]:
         operative_text = re.sub(
             re.escape(f"§ {citation_num} {title}"), "", operative_text, count=1
         ).strip()
+        # Defensive: the Annotations/copyright footer only ever trails after
+        # History, so it's only actually present in operative_text when a
+        # section has no History block to split it off (parts has length 1)
+        # -- but strip unconditionally rather than special-casing that.
+        operative_text = ANNOTATIONS_FOOTER_RE.sub("", operative_text).strip()
 
         all_chunks.extend(_chunk_section(doc_id, citation_num, title, operative_text))
+
+        if len(parts) > 1:
+            history_text = ANNOTATIONS_FOOTER_RE.sub("", parts[1]).strip()
+            history_text = HISTORY_LABEL_RE.sub("", history_text).strip()
+            if history_text:
+                all_chunks.extend(_chunk_history_text(doc_id, citation_num, title, history_text))
 
     return _dedupe_chunk_ids(all_chunks)
 
