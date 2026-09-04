@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { deleteDocument, listDocuments, uploadDocument } from "../api";
+import { pollJobUntilDone } from "../uploadJob";
 import type { DocumentSummary } from "../types";
 
 interface Props {
@@ -56,8 +57,13 @@ export function DocumentList({ onLoaded, refreshKey }: Props) {
     setReplacingId(doc.doc_id);
     setReplaceError(null);
     try {
-      await uploadDocument(file, doc.doc_id);
-      setLocalRefresh((k) => k + 1);
+      const accepted = await uploadDocument(file, doc.doc_id);
+      const job = await pollJobUntilDone(accepted.job_id);
+      if (job.status === "error") {
+        setReplaceError(job.error ?? "Processing failed");
+      } else {
+        setLocalRefresh((k) => k + 1);
+      }
     } catch (err) {
       setReplaceError((err as Error).message);
     } finally {

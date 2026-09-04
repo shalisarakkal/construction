@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
-import { getUploadJob, uploadDocument } from "../api";
-import type { JobStatusResponse } from "../types";
+import { uploadDocument } from "../api";
+import { pollJobUntilDone } from "../uploadJob";
 
 type FileStatus = "queued" | "uploading" | "processing" | "done" | "error";
 
@@ -13,24 +13,6 @@ interface FileEntry {
 
 interface Props {
   onUploaded: () => void;
-}
-
-const POLL_INTERVAL_MS = 800;
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// /upload now just enqueues a background ingest job (the actual PDF
-// parsing + embedding can take seconds to minutes) and returns a job_id
-// immediately -- poll /upload/jobs/{job_id} until it leaves the
-// queued/processing states.
-async function pollJobUntilDone(jobId: string): Promise<JobStatusResponse> {
-  for (;;) {
-    const job = await getUploadJob(jobId);
-    if (job.status === "done" || job.status === "error") return job;
-    await sleep(POLL_INTERVAL_MS);
-  }
 }
 
 export function UploadComponent({ onUploaded }: Props) {
