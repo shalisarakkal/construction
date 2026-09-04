@@ -135,6 +135,19 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       `njac_5_23_12A.pdf` (Optional Elevator Inspection Program), and both were ingested into the
       live corpus via the real `/upload` API (35 and 18 chunks). Corpus is now 19 documents, 2,108
       chunks.
+- [x] Confirmed N.J.A.C. 5:23-3.14/3.15/3.16/3.18/3.20/3.21/3.22 (Building/Plumbing/Electrical/
+      Energy/Mechanical/1&2-Family/Fuel Gas subcodes) are indexed — they're sections within
+      `njac_5_23_3.pdf` (already in the corpus since Phase 1), not separate files. Each mostly just
+      adopts an external model code (IBC/NEC/IECC/etc.) by reference, so what's indexed is NJ's
+      amendments to those codes, not the base code text — consistent with Phase 0's decision not to
+      download the copyrighted base codes themselves.
+
+## Out of scope (explicit decisions, not oversights)
+
+- N.J.A.C. 5:21 (Residential Site Improvement Standards / RSIS) — a different NJAC chapter
+      covering subdivision/site design standards (streets, parking, stormwater, utilities) for
+      residential development, not building construction. User decision 2026-09-04: skip unless
+      requested later. See `docs/AllDevFlow.md`'s Phase 1 "Scope check" note for the reasoning.
 
 ## Known issues / backlog
 

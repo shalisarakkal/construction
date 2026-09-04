@@ -298,6 +298,16 @@ Both new files ingested via the live `/upload` API (35 and 18 chunks respectivel
 affect existing ones. Corpus is now **19 documents, 2,108 chunks** (up from the 17/2,055 baseline
 set by this session's chunking-fix re-ingest — see "Beyond dream.md scope" below for that work).
 
+**Scope check, also 2026-09-04: N.J.A.C. 5:21 (Residential Site Improvement Standards / RSIS) is
+explicitly out of scope, by user decision.** Asked whether it's part of the project — it isn't:
+`dream.md` never named a specific regulation set, and this project's corpus scope was always
+N.J.A.C. **5:23** (the Uniform Construction Code) specifically, established in this Phase-0
+section above. 5:21 is a different NJAC chapter (also DCA-administered) covering subdivision/site
+design standards (streets, parking, stormwater, utilities) for residential development, not
+building construction — a different regulatory domain from everything indexed so far. Noting this
+explicitly, same as Phase 0's "Deliberately NOT downloaded" IBC/IRC/etc. list above, so it isn't
+mistaken for an oversight later: **not planned, not started, skip unless someone asks for it.**
+
 ### Known limitations / backlog (carried from Phase-0 planning review + new ones found while building)
 
 - **Synchronous `/upload`.** PDF parsing + embedding can take seconds; a production version
