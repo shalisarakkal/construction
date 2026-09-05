@@ -118,5 +118,5 @@ def test_build_context_block_matches_dream_md_format():
 
     block = build_context_block(results)
 
-    assert "[Doc: njac_5_23_1.pdf, N.J.A.C. 5:23-1.1]\nDoors shall be 36 inches wide." in block
-    assert "[Doc: generic_doc.pdf, Page 4]\nRamps shall not exceed a 1:12 slope." in block
+    assert "[Chunk 1 — Doc: njac_5_23_1.pdf, N.J.A.C. 5:23-1.1]\nDoors shall be 36 inches wide." in block
+    assert "[Chunk 2 — Doc: generic_doc.pdf, Page 4]\nRamps shall not exceed a 1:12 slope." in block

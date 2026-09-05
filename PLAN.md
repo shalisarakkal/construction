@@ -317,10 +317,30 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       the local Ollama model (`llama3.1:8b`) still answered "Not enough information" for the live
       `/query` call -- the retrieval bug is fixed (confirmed via direct `vector_store.search()`
       calls and by inspecting the exact context block sent to the LLM), but the small local model
-      isn't reliably drawing the "provision deleted → not required" inference from terse legislative
-      "shall be deleted" phrasing. This is a distinct LLM-synthesis limitation, not a retrieval or
-      chunking issue, and is **not yet fixed** -- see `docs/AllDevFlow.md` for detail; recorded here
-      rather than the backlog section since it was found mid-investigation, not separately triaged.
+      wasn't reliably drawing the "provision deleted → not required" inference from terse
+      legislative "shall be deleted" phrasing. **Also fixed** (see the next entry) --
+      `SYSTEM_PROMPT` now states that rule explicitly and asks the model to check each context
+      excerpt individually before giving up, and `build_context_block()` now actually numbers
+      chunks (`[Chunk N — Doc: ...]`) to match what its own docstring always claimed but never
+      implemented, giving the model a concrete handle to do that checking against.
+- [x] **Fixed the LLM-synthesis gap above.** Two changes to `llm.py`'s `SYSTEM_PROMPT`: (1)
+      explicit instruction that a section described as deleted/removed/not-adopted means its
+      requirement does NOT apply -- draw that conclusion directly rather than treating amendment
+      language as "not enough information"; (2) an explicit "check each numbered context excerpt
+      individually... don't stop after skimming the first one or two" instruction, since the first
+      version of fix (1) alone still failed live -- the model kept concluding "none of them
+      specifically address" the question despite the answer being in chunk 3 of 5, suggesting an
+      attention/skimming problem more than a pure semantics gap. Chunk numbering only worked once
+      `query.py`'s `build_context_block()` actually implemented it (found live: its docstring
+      claimed `[Chunk N — Doc: ...]` formatting, but the code only ever emitted `[Doc: ...]` with
+      no number -- fixed to match, and to give the "check each numbered excerpt" instruction
+      something concrete to act on). Verified live: the sprinkler question now gets **"No, NJ does
+      not require sprinklers in new one- and two-family homes... Section R309.2 ... is to be
+      deleted"** with the correct citation -- and the fence question (previously correct) still
+      answers correctly afterward, with no regression, now with an extra precise citation from the
+      earlier roman-numeral chunking fix. Backend tests: 114 passed (no count change --
+      `test_llm.py`'s assertions reference `llm.SYSTEM_PROMPT` symbolically, not its exact text, and
+      `test_build_context_block_matches_dream_md_format` updated for real `[Chunk N — ...]` output).
 
 ## Out of scope (explicit decisions, not oversights)
 

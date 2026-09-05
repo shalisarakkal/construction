@@ -1701,7 +1701,7 @@ own focused ~300-word chunk. The lesson: a "spot check" of one chunk's first par
 prove the rest of a 500-word chunk has no internal structure -- the actual re-ingestion run was the
 real test, not the sampling done during scoping.
 
-### A separate, still-open finding: the LLM isn't drawing the inference
+### A separate finding: the LLM wasn't drawing the inference (fixed below)
 
 Re-running the *exact* live `/query` call after the fix (not just the raw `vector_store.search()`
 check) surfaced something new: the correct chunk is now in the retrieved context, confirmed by
@@ -1713,9 +1713,50 @@ text is right there in the prompt), but the small local model isn't reliably dra
 provision was deleted → therefore not required" inference from terse legislative "shall be deleted"
 phrasing, especially with several *other* sprinkler-related-but-irrelevant chunks (nursing home/day
 care sprinkler exceptions, mixed-use building rules) also in context as plausible-looking
-distractors. Not fixed here -- it's a model-capability/prompt-engineering question distinct from
-this investigation's chunking scope, and changing the system prompt to push the model toward this
-kind of inference would affect every answer, not just this one case, so it deserves its own
-deliberate decision rather than a reflexive tweak. Recorded as an open finding, not yet triaged into
-the backlog as a separate item.
+distractors. It's a model-capability/prompt-engineering question distinct from this investigation's
+chunking scope, and changing the system prompt to push the model toward this kind of inference
+affects every answer, not just this one case -- so this got its own explicit decision from the user
+("Let's fix the LLM inference issue") rather than being folded silently into the chunking fix above.
+
+## LLM inference gap: fixing it took two rounds, plus a docstring that lied
+
+**First attempt**: added one sentence to `SYSTEM_PROMPT` stating the actual rule -- a section
+described as deleted/removed/not-adopted means its requirement does NOT apply, don't withhold that
+conclusion just because it's amendment language rather than plain prose. Re-ran the exact live
+`/query` call. **Still failed** -- same "Not enough information," this time with the justification
+"none of them specifically address the requirement for sprinklers in new one- and two-family homes,"
+which is false: chunk 3 of 5 is exactly that. This ruled out "the model doesn't know the semantic
+rule" as the root cause -- it's not applying the rule it was just given, on a passage it apparently
+isn't reading carefully. That points to an attention/skimming problem across a 5-chunk context, not
+a missing-fact problem.
+
+**Second attempt**: added an explicit instruction to check each context excerpt individually before
+concluding "not enough information," and referred to them as "numbered" -- on the theory that
+forcing explicit per-item consideration (rather than a single holistic read) helps a smaller model
+process multi-chunk context more reliably. Before testing this, checked whether the chunks were
+actually numbered in what the model receives: **they weren't**. `query.py`'s `build_context_block()`
+docstring has always claimed a `[Chunk N — Doc: <title>, ...]` format ("Matches dream.md section 4
+context-assembly format"), but the actual code only ever emitted `[Doc: <title>, ...]` -- no number,
+ever. A prompt instruction telling the model to check "each numbered excerpt" against context that
+was never actually numbered would have been actively misleading rather than merely unhelpful, so
+fixed `build_context_block()` to match its own docstring before relying on that wording. Updated
+`test_build_context_block_matches_dream_md_format` (the only test asserting its exact output) for
+the real `[Chunk N — Doc: ...]` format.
+
+**Verified live, both changes together**: the sprinkler question now gets *"No, NJ does not require
+sprinklers in new one- and two-family homes... Section R309.2 ... is to be deleted"* -- correct
+answer, correct citation (`N.J.A.C. 5:23-3.21(c).15.xxi+`). Re-ran the fence question afterward as a
+regression check (previously correct, and the one most likely to be affected by a broader prompt
+change) -- still correct, and now cites an additional precise chunk
+(`N.J.A.C. 5:23-3.14(b).3.xiv`) that the earlier roman-numeral chunking fix made retrievable.
+Backend tests: 114 passed, no count change -- `test_llm.py`'s assertions reference
+`llm.SYSTEM_PROMPT` symbolically rather than asserting its exact text, so the prompt wording change
+needed no test updates there.
+
+**Takeaway for future prompt/context changes**: a one-line semantic instruction wasn't enough on its
+own -- the fix that actually worked combined *telling* the model the rule with *structurally*
+making the context easier to process item-by-item. Worth remembering if a future retrieval or
+synthesis gap looks like "the model has the right information but isn't using it": check whether
+it's a knowledge gap (needs a rule stated) or an attention gap (needs the context restructured to be
+easier to scan) before assuming a prompt tweak alone will fix it.
 <!-- todo -->

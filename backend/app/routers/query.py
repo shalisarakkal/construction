@@ -8,11 +8,20 @@ from ..schemas import ChunkRecord, QueryRequest, QueryResponse, RetrievedChunk
 
 def build_context_block(results: list[tuple[dict, str, float]]) -> str:
     """Matches dream.md section 4 context-assembly format:
-    [Chunk N — Doc: <title>, <citation or page>]"""
+    [Chunk N — Doc: <title>, <citation or page>]
+
+    The "Chunk N" numbering was in the docstring but never actually
+    implemented until this fix -- added because it gives the LLM a concrete
+    handle to check each excerpt against individually, per SYSTEM_PROMPT's
+    "check each numbered context excerpt" instruction. See
+    docs/AllDevFlow.md's "LLM inference gap" investigation, 2026-09-05: a
+    real user question went unanswered because the model skimmed past a
+    relevant excerpt buried among several superficially-similar but
+    irrelevant ones."""
     parts = []
-    for chunk, doc_title, _score in results:
+    for i, (chunk, doc_title, _score) in enumerate(results, start=1):
         locator = chunk.get("citation") or f"Page {chunk.get('page_number')}"
-        parts.append(f"[Doc: {doc_title}, {locator}]\n{chunk['text']}")
+        parts.append(f"[Chunk {i} — Doc: {doc_title}, {locator}]\n{chunk['text']}")
     return "\n\n".join(parts)
 
 
