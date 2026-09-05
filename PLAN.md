@@ -309,3 +309,34 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       Same category of difficulty as Phase 0's fee-table discovery ("a naive sentence-chunker
       would flatten tables into unreadable text") — accepted as a residual limitation given it's
       2 chunks out of 2,601, not chased further here.
+- [ ] CAD/GIS file support -- user asked 2026-09-04 whether CAD/GIS files are supported; they
+      aren't natively (`ingestion.py` rejects any extension besides `.pdf`/`.docx`/`.txt`
+      outright). Splits into two very different-sized pieces of work:
+      - **As `dream.md` actually scoped it** ("CAD/GIS notes → text: Treat exported PDF/TXT/DOCX
+        as standard documents") -- this is largely already built: `generic_chunk()`'s own
+        docstring already names "CAD/GIS export notes" as a target input, and any PDF/DOCX/TXT
+        exported from a CAD/GIS tool ingests today with zero new code. The real gap is
+        untested chunk quality, not missing support: `generic_chunk()` sentence-splits on
+        `. ! ?` punctuation, an assumption that holds for regulatory prose but likely breaks on
+        the sparse labels/notes-lists/title-block text typical of a CAD/GIS export (no real
+        sentences to split on) -- and PDF text-extraction order for a drawing sheet often doesn't
+        match visual reading order in the first place, before chunking even starts. Effort: small,
+        roughly one focused session (comparable to this session's other chunking-quality fixes) --
+        get 1-2 real sample exported files from the user, inspect actual extracted text shape, and
+        likely add a line/label-based chunking path (mirroring the `looks_like_njac`/
+        `looks_like_statute` sniff-and-branch pattern) if the sentence-based one produces
+        garbage chunks on that shape of text. Blocked on the user supplying real sample files --
+        can't responsibly estimate the fix without seeing what the actual extracted text looks
+        like.
+      - **Native CAD/GIS file parsing** (opening a raw `.dwg`/`.dxf`/`.shp`/`.geojson`/geodatabase
+        directly, not an export) -- a genuinely different, much larger feature, not an extension
+        of the above. Needs new per-format dependencies (`ezdxf` for DXF; DWG itself is a
+        proprietary binary format needing a conversion step first; GDAL/Fiona/Shapely for GIS
+        vector formats), a new definition of "extractable text" per format (DXF TEXT/MTEXT
+        entities and block attributes; a shapefile's DBF attribute table; a GeoJSON `properties`
+        object), a different chunking granularity (one chunk per entity/feature rather than per
+        paragraph), schema additions (`chunks` has no field for a CAD layer name or geometry
+        type), and arguably a different retrieval model altogether -- semantic similarity search
+        over prose doesn't map cleanly onto spatial/geometric data. Effort: large, multi-session,
+        closer to a new subsystem than a chunker addition -- would warrant its own phase-level
+        plan rather than a single backlog line item if actually picked up.
