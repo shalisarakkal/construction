@@ -1458,6 +1458,37 @@ Ran the full suite (not just the new cases) after the refactor, same regression-
 as the Pinecone change.
 
 **Not yet done**: real end-to-end verification against a live Weaviate Cloud cluster (needs the
-user's cluster URL + API key and the same explicit go-ahead the blocked Pinecone check needs) and
-the Phase 5a migration script itself. Both remain open.
+user's cluster URL + API key) and the Phase 5a migration script itself. Both remain open.
+
+### FAISS and Pinecone verified live; Weaviate still pending
+
+The user then asked to run through both remaining verification gaps explicitly.
+
+**FAISS, against the real corpus (not a fake/isolated one)**: confirmed the active provider was
+already `faiss` (the `.env` line for Pinecone stays commented out, and `faiss` is `config.py`'s
+default -- no change needed), ran the full backend (107) and frontend (51) suites, then started
+the real backend against the actual `backend/storage/` dev corpus on a scratch port and hit it live:
+`/health`, `/documents` (all 19 real documents), `/query` re-running the fence-question regression
+check from earlier this session (still returns the correct answer and top citation,
+`N.J.A.C. 5:23-2.14(b).9`, confirming the 3-way vector_store refactor didn't disturb the FAISS
+path), `/documents/{id}/chunks`, and `/documents/{id}/versions`. Found three other uvicorn
+processes already running (the user's own dev servers on ports 8000/8099) while locating the test
+server's PID to shut it down -- used `Get-CimInstance Win32_Process ... Select CommandLine` to
+identify the *exact* PID bound to the scratch port before killing anything, rather than a blunt
+`taskkill`, specifically so the user's own running servers were never touched.
+
+**Pinecone, with real network calls this time**: the user said "Now let's go pinecone. Make live
+calls using API Key" -- clear, explicit authorization for the exact action the auto-mode
+classifier blocked earlier in this session. Reran the same verification script as before (add two
+vectors, search for an exact match, delete one, confirm it's gone, clean up) but against a
+throwaway index name (`construction-rag-verify`), not the user's real corpus, and deleted that
+index again at the end so nothing lingers in their account or counts against their free-tier
+quota. All steps passed against the real API: exact-match cosine score came back as precisely
+`1.0` (not just "close to 1.0"), and the non-match scored `0.0`, both consistent with the unit
+vectors used as test data. This is the first fully real (not fake-monkeypatched) confirmation that
+the Pinecone adapter's `_pinecone_index()`/`add_document()`/`search()`/`delete_document()` branches
+work end-to-end against the actual service, not just against `_FakePineconeIndex`.
+
+**Still open**: Weaviate live verification (needs the user's cluster URL + API key) and the
+Phase 5a migration script.
 <!-- todo -->
