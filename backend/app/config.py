@@ -15,6 +15,14 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
     ollama_num_gpu: int | None = None  # forwarded as options.num_gpu; 0 forces CPU-only
+    vector_store_provider: str = "faiss"  # "faiss", "pinecone", or "weaviate"
+    pinecone_api_key: str | None = None
+    pinecone_index_name: str = "construction-rag"
+    pinecone_cloud: str = "aws"
+    pinecone_region: str = "us-east-1"
+    weaviate_cluster_url: str | None = None
+    weaviate_api_key: str | None = None
+    weaviate_collection_name: str = "ConstructionRagChunk"
 
     model_config = {"env_prefix": "RAG_", "env_file": ".env"}
 

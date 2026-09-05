@@ -1,11 +1,26 @@
-"""Combined FAISS vector index + SQLite metadata store, per dream.md section
-3.2 (FAISS for vectors, SQLite/Postgres for metadata since FAISS itself has
-no metadata storage).
+"""Vector index + SQLite metadata store, per dream.md section 3.2 (FAISS,
+Pinecone, or Weaviate for vectors, SQLite/Postgres for metadata since none
+of the three vector backends store full chunk metadata itself). Which
+vector backend is active is controlled by RAG_VECTOR_STORE_PROVIDER
+("faiss", "pinecone", or "weaviate") -- see add_document()/search()/
+delete_document(), each of which branches on settings.vector_store_provider,
+same pattern as llm.py's provider switch. Switching this setting does NOT
+migrate existing vectors between backends -- see docs/AllDevFlow.md's
+"Phase 5" section for why that's a separate (not yet built) migration
+script, deferred as Phase 5a.
 
 FAISS row ids are assigned sequentially as vectors are added (row id =
-ntotal before add). We persist that mapping in SQLite (`chunks.faiss_row_id`)
-so a search result (row id -> similarity score) can be joined back to full
-chunk metadata.
+ntotal before add) and persisted in SQLite (`chunks.faiss_row_id`) so a
+search result (row id -> similarity score) can be joined back to full chunk
+metadata. Pinecone instead addresses vectors directly by `chunk_id` (its
+upsert/query/delete all take arbitrary string ids). Weaviate requires a
+UUID per object, so its chunk_id is deterministically hashed into one via
+`generate_uuid5()` and also stored as a property so a query result can be
+read back to the original chunk_id without needing the reverse mapping.
+Neither Pinecone nor Weaviate mode needs `faiss_row_id` for lookups -- it's
+still populated with a filler sequential value in both to satisfy the
+column's NOT NULL UNIQUE constraint without a schema migration, but is
+never read back outside FAISS mode.
 """
 
 import json
@@ -85,6 +100,71 @@ def _save_index(index: faiss.Index):
     faiss.write_index(index, str(settings.faiss_index_path))
 
 
+_pinecone_index_handle = None
+
+
+def _pinecone_index():
+    """Lazily creates the Pinecone client + serverless index and caches the
+    handle for reuse within this process. Tests monkeypatch this function
+    directly rather than exercising the real client, same seam pattern as
+    llm.py's _anthropic_chat/_ollama_chat."""
+    global _pinecone_index_handle
+    if _pinecone_index_handle is not None:
+        return _pinecone_index_handle
+
+    from pinecone import Pinecone, ServerlessSpec
+
+    client = Pinecone(api_key=settings.pinecone_api_key)
+    if not client.indexes.exists(name=settings.pinecone_index_name):
+        client.indexes.create(
+            name=settings.pinecone_index_name,
+            dimension=settings.embedding_dim,
+            metric="cosine",  # embeddings.py normalizes vectors, so this matches FAISS's IndexFlatIP scores exactly
+            spec=ServerlessSpec(cloud=settings.pinecone_cloud, region=settings.pinecone_region),
+            timeout=60,
+        )
+    _pinecone_index_handle = client.Index(name=settings.pinecone_index_name)
+    return _pinecone_index_handle
+
+
+_weaviate_collection_handle = None
+
+
+def _weaviate_collection():
+    """Lazily creates the Weaviate Cloud client + collection and caches the
+    handle for reuse within this process. Tests monkeypatch this function
+    directly, same seam pattern as _pinecone_index()/llm.py's
+    _anthropic_chat/_ollama_chat.
+
+    vectorizer_config=none because we supply our own vectors (same reason
+    as Pinecone's plain index -- no built-in text vectorizer module is
+    involved). chunk_id is stored as a property (in addition to being
+    hashed into the object's UUID via generate_uuid5) purely so a query
+    result can be read back to its chunk_id directly, without needing a
+    reverse UUID lookup."""
+    global _weaviate_collection_handle
+    if _weaviate_collection_handle is not None:
+        return _weaviate_collection_handle
+
+    import weaviate
+    from weaviate.classes.config import Configure, DataType, Property, VectorDistances
+    from weaviate.classes.init import Auth
+
+    client = weaviate.connect_to_weaviate_cloud(
+        cluster_url=settings.weaviate_cluster_url,
+        auth_credentials=Auth.api_key(settings.weaviate_api_key),
+    )
+    if not client.collections.exists(settings.weaviate_collection_name):
+        client.collections.create(
+            name=settings.weaviate_collection_name,
+            properties=[Property(name="chunk_id", data_type=DataType.TEXT)],
+            vectorizer_config=Configure.Vectorizer.none(),
+            vector_index_config=Configure.VectorIndex.hnsw(distance_metric=VectorDistances.COSINE),
+        )
+    _weaviate_collection_handle = client.collections.get(settings.weaviate_collection_name)
+    return _weaviate_collection_handle
+
+
 def find_document_by_hash(content_hash: str) -> dict | None:
     """Duplicate-upload check -- see docs/AllDevFlow.md Phase 2 notes. Content
     hash (not filename) so the same file under a different name is still
@@ -115,10 +195,28 @@ def add_document(doc_id: str, title: str, filename: str, chunker_used: str,
     history" rather than replace-on-reupload) and this new one becomes the
     latest version in that chain. See docs/AllDevFlow.md's "Document
     versioning" section."""
-    index = _load_or_create_index()
-    start_row = index.ntotal
-    index.add(vectors)
-    _save_index(index)
+    row_ids = None
+    if settings.vector_store_provider == "pinecone":
+        chunk_ids = [c["chunk_id"] for c in chunks]
+        _pinecone_index().upsert(vectors=list(zip(chunk_ids, vectors.tolist())))
+    elif settings.vector_store_provider == "weaviate":
+        from weaviate.classes.data import DataObject
+        from weaviate.util import generate_uuid5
+
+        _weaviate_collection().data.insert_many([
+            DataObject(
+                uuid=generate_uuid5(chunk["chunk_id"]),
+                properties={"chunk_id": chunk["chunk_id"]},
+                vector=vector.tolist(),
+            )
+            for chunk, vector in zip(chunks, vectors)
+        ])
+    else:
+        index = _load_or_create_index()
+        start_row = index.ntotal
+        index.add(vectors)
+        _save_index(index)
+        row_ids = list(range(start_row, start_row + len(chunks)))
 
     with _connect() as conn:
         conn.execute(
@@ -133,6 +231,10 @@ def add_document(doc_id: str, title: str, filename: str, chunker_used: str,
             conn.execute(
                 "UPDATE documents SET is_latest = 0 WHERE doc_id = ?", (supersedes_doc_id,)
             )
+        if row_ids is None:
+            # Pinecone mode: faiss_row_id is unused filler -- see module docstring.
+            next_row = conn.execute("SELECT COALESCE(MAX(faiss_row_id), -1) + 1 AS n FROM chunks").fetchone()["n"]
+            row_ids = list(range(next_row, next_row + len(chunks)))
         for i, chunk in enumerate(chunks):
             conn.execute(
                 """INSERT INTO chunks
@@ -143,7 +245,7 @@ def add_document(doc_id: str, title: str, filename: str, chunker_used: str,
                     chunk["chunk_id"], doc_id, chunk["chunk_type"], chunk.get("citation"),
                     chunk.get("section_title"), chunk.get("page_number"), chunk["text"],
                     chunk["word_count"], json.dumps(chunk.get("references", [])),
-                    start_row + i,
+                    row_ids[i],
                 ),
             )
 
@@ -152,22 +254,43 @@ def delete_document(doc_id: str) -> bool:
     """Deletes a document's row and all its chunk rows. Returns False if the
     doc_id didn't exist.
 
-    Deliberately does NOT touch the FAISS index. Removing rows from a flat
-    FAISS index compacts the array, which would shift every subsequent
-    vector's position and silently invalidate every other chunk's stored
-    faiss_row_id (row ids are assigned as ntotal-at-insert-time, an
-    append-only scheme -- see add_document()). Leaving the now-orphaned
-    vectors in place is harmless: search() already joins a FAISS hit back to
-    a chunk row by faiss_row_id and skips any hit with none (the same
-    tolerance that already covers orphans left by a failed upload). Tradeoff:
-    the FAISS index file only ever grows, never shrinks -- acceptable for
-    this project's corpus size; a real fix would mean rebuilding the index
-    from the surviving chunks, deferred as a Phase-2 backlog item (see
-    docs/AllDevFlow.md)."""
+    FAISS mode deliberately does NOT touch the FAISS index. Removing rows
+    from a flat FAISS index compacts the array, which would shift every
+    subsequent vector's position and silently invalidate every other
+    chunk's stored faiss_row_id (row ids are assigned as ntotal-at-insert-
+    time, an append-only scheme -- see add_document()). Leaving the
+    now-orphaned vectors in place is harmless: search() already joins a
+    FAISS hit back to a chunk row by faiss_row_id and skips any hit with
+    none (the same tolerance that already covers orphans left by a failed
+    upload). Tradeoff: the FAISS index file only ever grows, never shrinks
+    -- acceptable for this project's corpus size; a real fix would mean
+    rebuilding the index from the surviving chunks, see compact_index().
+
+    Pinecone and Weaviate mode do NOT have this tradeoff: both support
+    deleting individual vectors by id without disturbing anything else, so
+    this issues a real delete call against whichever is active -- no orphan
+    accumulation, and compact_index() is a FAISS-only concept in either
+    cloud mode."""
     with _connect() as conn:
         exists = conn.execute("SELECT 1 FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
         if not exists:
             return False
+        chunk_ids = [
+            r["chunk_id"] for r in conn.execute(
+                "SELECT chunk_id FROM chunks WHERE doc_id = ?", (doc_id,)
+            ).fetchall()
+        ]
+
+    if chunk_ids and settings.vector_store_provider == "pinecone":
+        _pinecone_index().delete(ids=chunk_ids)
+    elif chunk_ids and settings.vector_store_provider == "weaviate":
+        from weaviate.classes.query import Filter
+        from weaviate.util import generate_uuid5
+
+        uuids = [generate_uuid5(cid) for cid in chunk_ids]
+        _weaviate_collection().data.delete_many(where=Filter.by_id().contains_any(uuids))
+
+    with _connect() as conn:
         conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
     return True
@@ -196,7 +319,16 @@ def compact_index() -> dict:
     as the very last step, after the SQLite row-id updates have already
     committed -- so the existing (larger but valid) index file stays intact
     for as long as possible if anything goes wrong partway through. Run with
-    the backend stopped."""
+    the backend stopped.
+
+    FAISS-only: neither Pinecone nor Weaviate mode ever accumulates orphaned
+    vectors in the first place (delete_document() deletes them for real in
+    both), so there's nothing to compact."""
+    if settings.vector_store_provider != "faiss":
+        raise RuntimeError(
+            "compact_index() is FAISS-only; RAG_VECTOR_STORE_PROVIDER is "
+            f"'{settings.vector_store_provider}', which doesn't accumulate orphaned vectors."
+        )
     old_index = _load_or_create_index()
     before = old_index.ntotal
 
@@ -327,6 +459,14 @@ def get_job(job_id: str) -> dict | None:
 
 def search(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]]:
     """Returns list of (chunk_dict, doc_title, similarity_score)."""
+    if settings.vector_store_provider == "pinecone":
+        return _search_pinecone(query_vector, top_k)
+    if settings.vector_store_provider == "weaviate":
+        return _search_weaviate(query_vector, top_k)
+    return _search_faiss(query_vector, top_k)
+
+
+def _search_faiss(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]]:
     index = _load_or_create_index()
     if index.ntotal == 0:
         return []
@@ -353,4 +493,57 @@ def search(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]
                 # each document, same tolerance pattern as orphaned rows.
                 continue
             results.append((_row_to_chunk(chunk_row), doc_row["title"], float(score)))
+    return results
+
+
+def _search_pinecone(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]]:
+    response = _pinecone_index().query(
+        vector=query_vector.tolist(), top_k=top_k, include_values=False, include_metadata=False
+    )
+
+    results = []
+    with _connect() as conn:
+        for match in response.matches:
+            chunk_row = conn.execute(
+                "SELECT * FROM chunks WHERE chunk_id = ?", (match.id,)
+            ).fetchone()
+            if chunk_row is None:
+                continue
+            doc_row = conn.execute(
+                "SELECT title, is_latest FROM documents WHERE doc_id = ?", (chunk_row["doc_id"],)
+            ).fetchone()
+            if doc_row is None or not doc_row["is_latest"]:
+                continue
+            results.append((_row_to_chunk(chunk_row), doc_row["title"], float(match.score)))
+    return results
+
+
+def _search_weaviate(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]]:
+    from weaviate.classes.query import MetadataQuery
+
+    response = _weaviate_collection().query.near_vector(
+        near_vector=query_vector.tolist(),
+        limit=top_k,
+        return_metadata=MetadataQuery(distance=True),
+        return_properties=["chunk_id"],
+    )
+
+    results = []
+    with _connect() as conn:
+        for obj in response.objects:
+            chunk_row = conn.execute(
+                "SELECT * FROM chunks WHERE chunk_id = ?", (obj.properties["chunk_id"],)
+            ).fetchone()
+            if chunk_row is None:
+                continue
+            doc_row = conn.execute(
+                "SELECT title, is_latest FROM documents WHERE doc_id = ?", (chunk_row["doc_id"],)
+            ).fetchone()
+            if doc_row is None or not doc_row["is_latest"]:
+                continue
+            # Weaviate returns cosine distance, not similarity -- convert so
+            # scores line up with FAISS's/Pinecone's similarity scale (the
+            # confidence-badge thresholds are tuned against that scale).
+            score = 1.0 - obj.metadata.distance
+            results.append((_row_to_chunk(chunk_row), doc_row["title"], score))
     return results

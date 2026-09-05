@@ -138,3 +138,204 @@ def test_get_document_versions_walks_full_chain_from_middle_link():
     chain = vector_store.get_document_versions("v2")
 
     assert [d["doc_id"] for d in chain] == ["v1", "v2", "v3"]
+
+
+# ---------------------------------------------------------------------------
+# Pinecone provider path -- see vector_store.py's module docstring.
+# `_pinecone_index()` is monkeypatched to a fake in-memory index (no real
+# API key/network needed), same seam pattern as llm.py's tests mocking
+# _anthropic_chat/_ollama_chat.
+# ---------------------------------------------------------------------------
+
+
+class _FakeScoredVector:
+    def __init__(self, id, score):
+        self.id = id
+        self.score = score
+
+
+class _FakeQueryResponse:
+    def __init__(self, matches):
+        self.matches = matches
+
+
+class _FakePineconeIndex:
+    """In-memory stand-in for a Pinecone Index: cosine similarity computed
+    directly (vectors here are unit basis vectors, so a dot product is
+    exact), no network calls."""
+
+    def __init__(self):
+        self.vectors: dict[str, list[float]] = {}
+        self.deleted_ids: list[str] = []
+
+    def upsert(self, vectors):
+        for chunk_id, values in vectors:
+            self.vectors[chunk_id] = values
+
+    def query(self, *, vector, top_k, include_values=False, include_metadata=False):
+        scored = [
+            (chunk_id, float(np.dot(values, vector)))
+            for chunk_id, values in self.vectors.items()
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        matches = [_FakeScoredVector(cid, score) for cid, score in scored[:top_k]]
+        return _FakeQueryResponse(matches)
+
+    def delete(self, *, ids):
+        self.deleted_ids.extend(ids)
+        for chunk_id in ids:
+            self.vectors.pop(chunk_id, None)
+
+
+@pytest.fixture
+def pinecone_provider(monkeypatch):
+    monkeypatch.setattr(settings, "vector_store_provider", "pinecone")
+    fake_index = _FakePineconeIndex()
+    monkeypatch.setattr(vector_store, "_pinecone_index", lambda: fake_index)
+    return fake_index
+
+
+def test_pinecone_add_and_search_round_trip(pinecone_provider):
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc Two", _unit_vector(1), "hash2")
+
+    results = vector_store.search(_unit_vector(0), top_k=5)
+
+    assert [title for _chunk, title, _score in results] == ["Doc One", "Doc Two"]
+    assert pinecone_provider.vectors.keys() == {"doc1_0", "doc2_0"}
+
+
+def test_pinecone_delete_document_removes_vectors_from_index(pinecone_provider):
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc Two", _unit_vector(1), "hash2")
+
+    deleted = vector_store.delete_document("doc1")
+
+    assert deleted is True
+    assert pinecone_provider.deleted_ids == ["doc1_0"]
+    assert "doc1_0" not in pinecone_provider.vectors
+    results = vector_store.search(_unit_vector(0), top_k=5)
+    assert [title for _chunk, title, _score in results] == ["Doc Two"]
+
+
+def test_pinecone_search_hides_superseded_documents(pinecone_provider):
+    _add_doc("doc1", "Doc One v1", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc One v2", _unit_vector(0), "hash2", supersedes_doc_id="doc1")
+
+    results = vector_store.search(_unit_vector(0), top_k=5)
+
+    assert [title for _chunk, title, _score in results] == ["Doc One v2"]
+
+
+def test_compact_index_raises_for_non_faiss_provider(pinecone_provider):
+    with pytest.raises(RuntimeError, match="FAISS-only"):
+        vector_store.compact_index()
+
+
+# ---------------------------------------------------------------------------
+# Weaviate provider path -- same seam-monkeypatching approach as Pinecone
+# above, via a fake in-memory collection (no real cluster URL/API key/
+# network needed).
+# ---------------------------------------------------------------------------
+
+
+class _FakeWeaviateObject:
+    def __init__(self, uuid, chunk_id, distance):
+        self.uuid = uuid
+        self.properties = {"chunk_id": chunk_id}
+        self.metadata = type("Metadata", (), {"distance": distance})()
+
+
+class _FakeWeaviateQueryResponse:
+    def __init__(self, objects):
+        self.objects = objects
+
+
+class _FakeWeaviateData:
+    def __init__(self, store):
+        self._store = store
+
+    def insert_many(self, objects):
+        for obj in objects:
+            self._store[str(obj.uuid)] = (obj.properties["chunk_id"], obj.vector)
+
+    def delete_many(self, where):
+        for uuid in where.value:
+            self._store.pop(uuid, None)
+
+
+class _FakeWeaviateQuery:
+    def __init__(self, store):
+        self._store = store
+
+    def near_vector(self, *, near_vector, limit, return_metadata=None, return_properties=None):
+        # Cosine distance = 1 - cosine similarity; vectors here are unit
+        # basis vectors, so a plain dot product is an exact cosine similarity.
+        scored = [
+            (uuid, chunk_id, 1.0 - float(np.dot(vector, near_vector)))
+            for uuid, (chunk_id, vector) in self._store.items()
+        ]
+        scored.sort(key=lambda triple: triple[2])
+        objects = [
+            _FakeWeaviateObject(uuid, chunk_id, distance)
+            for uuid, chunk_id, distance in scored[:limit]
+        ]
+        return _FakeWeaviateQueryResponse(objects)
+
+
+class _FakeWeaviateCollection:
+    """In-memory stand-in for a Weaviate Collection, keyed by uuid like the
+    real one (generate_uuid5(chunk_id) is still used by vector_store.py to
+    compute that key, so this fake exercises the same id-derivation code)."""
+
+    def __init__(self):
+        self.store: dict[str, tuple[str, list[float]]] = {}
+        self.data = _FakeWeaviateData(self.store)
+        self.query = _FakeWeaviateQuery(self.store)
+
+
+@pytest.fixture
+def weaviate_provider(monkeypatch):
+    monkeypatch.setattr(settings, "vector_store_provider", "weaviate")
+    fake_collection = _FakeWeaviateCollection()
+    monkeypatch.setattr(vector_store, "_weaviate_collection", lambda: fake_collection)
+    return fake_collection
+
+
+def test_weaviate_add_and_search_round_trip(weaviate_provider):
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc Two", _unit_vector(1), "hash2")
+
+    results = vector_store.search(_unit_vector(0), top_k=5)
+
+    assert [title for _chunk, title, _score in results] == ["Doc One", "Doc Two"]
+    assert results[0][2] == pytest.approx(1.0)  # exact match -> distance 0 -> score 1.0
+    stored_chunk_ids = {chunk_id for chunk_id, _vector in weaviate_provider.store.values()}
+    assert stored_chunk_ids == {"doc1_0", "doc2_0"}
+
+
+def test_weaviate_delete_document_removes_vectors_from_collection(weaviate_provider):
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc Two", _unit_vector(1), "hash2")
+
+    deleted = vector_store.delete_document("doc1")
+
+    assert deleted is True
+    remaining_chunk_ids = {chunk_id for chunk_id, _vector in weaviate_provider.store.values()}
+    assert remaining_chunk_ids == {"doc2_0"}
+    results = vector_store.search(_unit_vector(0), top_k=5)
+    assert [title for _chunk, title, _score in results] == ["Doc Two"]
+
+
+def test_weaviate_search_hides_superseded_documents(weaviate_provider):
+    _add_doc("doc1", "Doc One v1", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc One v2", _unit_vector(0), "hash2", supersedes_doc_id="doc1")
+
+    results = vector_store.search(_unit_vector(0), top_k=5)
+
+    assert [title for _chunk, title, _score in results] == ["Doc One v2"]
+
+
+def test_compact_index_raises_for_weaviate_provider(weaviate_provider):
+    with pytest.raises(RuntimeError, match="FAISS-only"):
+        vector_store.compact_index()

@@ -14,3 +14,5 @@ Pillow>=12.2.0
 python-docx==1.1.2
 pytest==9.1.1
 httpx==0.28.1
+pinecone==10.0.0
+weaviate-client==4.23.0

@@ -39,7 +39,19 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
 
 ## Phase 5 — Scaling + Optional Cloud
 
-- [ ] Pinecone/Weaviate adapter
+- [ ] Pinecone/Weaviate adapter — three-way switch built 2026-09-04
+      (`RAG_VECTOR_STORE_PROVIDER=faiss|pinecone|weaviate`, Weaviate targeting Weaviate Cloud, not
+      self-hosted), same provider-switch pattern as the LLM adapter. Unit-tested against fake
+      Pinecone/Weaviate doubles (23 vector_store tests, backend total 99 → 107); **not yet verified
+      against real Pinecone/Weaviate Cloud accounts** -- needs the user's API keys/cluster URL and
+      explicit go-ahead for the live network calls before that can happen (a live Pinecone check was
+      already attempted once and blocked by the auto-mode permission classifier as a real external
+      network action). Switching the env var does **not** migrate existing vectors between backends
+      -- deferred as **Phase 5a** (a separate re-embed-from-SQLite-and-re-upsert migration script;
+      see docs/AllDevFlow.md's "Phase 5" section for the full reasoning).
+- [ ] Phase 5a — vector-store migration script (re-embeds stored chunk text and re-upserts into
+      whichever backend is newly active, so switching `RAG_VECTOR_STORE_PROVIDER` doesn't strand
+      already-ingested documents). Not started.
 - [ ] Authentication
 - [ ] Multi-user support
 - [ ] Rate limiting

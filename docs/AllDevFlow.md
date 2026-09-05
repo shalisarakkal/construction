@@ -1272,3 +1272,192 @@ on an inside click, applies the danger class). `DocumentList.test.tsx`'s three `
 mocked delete tests rewritten to exercise the real dialog via `role="dialog"` + `within()` queries
 instead (one of them now also asserts `window.confirm` was never called), plus one new test for
 the Escape-to-cancel path. Frontend tests: 43 passed → **51 passed**.
+
+## Phase 5 — vector-store provider switch (FAISS / Pinecone / Weaviate)
+
+Phase 5's four items (Pinecone/Weaviate adapter, auth, multi-user, rate limiting) are largely
+independent, so asked the user which to tackle first rather than guessing an order -- picked the
+Pinecone/Weaviate adapter. That item itself splits two ways (Pinecone: managed cloud, needs an
+account/API key; Weaviate: can self-host via Docker, no account needed) with a real tradeoff --
+Weaviate would let me verify it end-to-end myself immediately, the same way every other feature
+this session has been verified, while Pinecone would need the user to create an account and hand
+over an API key before real verification is possible. Asked again; the user chose Pinecone anyway.
+
+**Design**: mirrors `llm.py`'s existing `RAG_LLM_PROVIDER` pattern -- a new `RAG_VECTOR_STORE_PROVIDER`
+setting (`faiss` default, or `pinecone`), with `vector_store.py`'s `add_document()`/`search()`/
+`delete_document()` each branching on it, same flat if/else style as `llm.py` rather than an
+abstract base class + subclasses (the two backends' actual data models differ enough --
+positional FAISS row ids vs. Pinecone's arbitrary string ids -- that a shared interface would have
+forced one side to fake the other's shape; simple branches were more honest about that).
+
+**API research done before writing any code**, since the Pinecone Python SDK has churned through
+several major versions (the package itself was renamed `pinecone-client` -> `pinecone` at v5, and
+is at v10 as of this session) and a doc search kept surfacing a newer schema/`documents.upsert()`
+API alongside the classic one: installed `pinecone==10.0.0` into a scratch environment and used
+`inspect.signature()`/`help()` directly against the installed package rather than trusting search
+results, confirming the classic vector API (`pc.indexes.create()`, `index.upsert(vectors=[(id,
+values)])`, `index.query(vector=, top_k=)`, `index.delete(ids=)`) is still fully supported and is
+the right fit here (one flat vector per chunk, no need for the newer document-schema features).
+Also confirmed `QueryResponse.matches` is a list of objects with `.id`/`.score` attributes (not the
+`._id`/`._score` dict-style access the newer schema API uses) by reading the installed package's
+source directly. Caught and fixed a minor slip during this research: an exploratory
+`pip install pinecone` accidentally landed in the machine's global Python instead of the project's
+`.venv` -- noticed via `pip show` returning the wrong site-packages path, uninstalled it from
+global immediately, and reinstalled inside `.venv` where it belongs.
+
+**Implementation** (`backend/app/vector_store.py`, `config.py`, `.env.example`,
+`requirements.txt`):
+- `add_document()`: Pinecone mode upserts each chunk's vector keyed directly by `chunk_id`
+  (`index.upsert(vectors=[(chunk_id, values), ...])`) instead of assigning sequential FAISS row
+  ids. The `chunks.faiss_row_id` column is still `NOT NULL UNIQUE` in the schema (changing that
+  would need a migration -- this project has none, see the schema-migration backlog item -- and
+  would force a storage wipe of the real dev corpus), so Pinecone mode still fills it with a
+  throwaway sequential value (`MAX(faiss_row_id) + 1`) that's written but never read back in that
+  mode; only documented as filler, not a real mapping.
+- `search()`: split into `_search_faiss()` (unchanged logic, extracted verbatim) and
+  `_search_pinecone()` (embeds the query the same way as before, calls `index.query()`, then joins
+  each match straight back to its chunk row by `chunk_id` -- no row-id indirection needed at all
+  in this mode, which is actually simpler than the FAISS path). Both still apply the same
+  is_latest/superseded-document filter as before.
+- `delete_document()`: Pinecone mode now issues a real `index.delete(ids=chunk_ids)` before the
+  SQLite delete. This is a genuine improvement over FAISS mode in the same function, not just
+  parity -- FAISS's flat index can't remove a vector without shifting every subsequent row's
+  position (see that function's existing docstring on why deletes there only ever orphan, never
+  truly remove, requiring the separate `compact_index()` maintenance step), while Pinecone deletes
+  by id natively with no such tradeoff. So Pinecone mode never accumulates orphaned vectors in the
+  first place.
+- `compact_index()`: now raises `RuntimeError` up front if the active provider isn't `faiss` --
+  it's a fix for a FAISS-only problem (orphan accumulation) that doesn't exist in Pinecone mode,
+  so silently no-op'ing felt more likely to hide a real misconfiguration than a clear error would.
+- `_pinecone_index()`: single lazy-cached seam (client init + idempotent `create_index`-if-missing
+  + `Index()` handle), the one function tests monkeypatch wholesale -- same seam pattern `llm.py`
+  already used for `_anthropic_chat`/`_ollama_chat`, so a test never needs a real API key or
+  network access to exercise the branching logic.
+- Index created with `metric="cosine"`: `embeddings.py` already L2-normalizes every vector before
+  storage (`normalize_embeddings=True`), so cosine similarity and FAISS's `IndexFlatIP` inner
+  product are mathematically identical on this data -- Pinecone mode's similarity scores line up
+  exactly with FAISS mode's, no separate score-scale/threshold reconciliation needed for the
+  confidence-badge logic already tuned against FAISS scores.
+
+**Tests**: 4 new cases in `test_vector_store.py` against a `_FakePineconeIndex` (an in-memory
+dict-backed stand-in with real cosine-equivalent scoring via `np.dot`, no network) -- add+search
+round trip, delete actually removes vectors from the fake index (not just SQLite), superseded
+documents still hidden in Pinecone mode, and `compact_index()` raising for a non-FAISS provider.
+Backend tests: 99 passed → **103 passed**. Ran the *entire* existing suite (not just the new
+tests) immediately after the refactor to confirm zero regression to the FAISS default path, since
+`add_document()`/`search()`/`delete_document()` are exercised by nearly every other backend test
+indirectly.
+
+**Not yet done at this point**: real end-to-end verification against an actual Pinecone account --
+everything above is unit-tested against a fake, consistent with this session's usual practice of
+verifying against live systems wherever possible, but a live Pinecone index needs an account and
+API key only the user can provide (account creation is outside what an assistant should do on
+someone's behalf). Attempted the live check once a key was available (see security incident
+below) -- it was blocked by the auto-mode permission classifier as a real external network action
+and needs the user's explicit go-ahead, which hasn't happened yet. Still outstanding.
+
+### Security incident: a plaintext API-key file was already staged for commit
+
+Immediately after the above, `git status` (ahead of a routine commit) surfaced an untracked file,
+`key.txt`, at the repo root that was **already `git add`ed** -- containing two real plaintext API
+keys (OpenRouter and Pinecone), neither created nor staged by anything done in this session. This
+is exactly the "secrets about to be committed" scenario the standing safety rules exist for:
+unstaged it immediately (`git reset key.txt`) before doing anything else, added `key.txt` to
+`.gitignore` as a defensive backstop, and relocated the Pinecone key into `backend/.env` (already
+gitignored, the same place `RAG_ANTHROPIC_API_KEY` already lives) rather than leaving it sitting
+in an un-ignored plaintext file. The OpenRouter key isn't used anywhere in this project, so it was
+left untouched and merely flagged to the user rather than acted on. Nothing containing either key
+was ever committed. This was very likely the user proactively supplying the Pinecone key I'd just
+asked for, dropped in a file rather than pasted in chat -- reasonable intent, unsafe location.
+
+### Weaviate research, then building all three behind one switch
+
+With a real Pinecone key now available (but live verification still blocked pending approval, see
+above), the user asked two research questions before deciding anything further: how to add
+Weaviate the same way Ollama/Anthropic are switched (env var, no code changes yet -- explicitly
+"just a study"), and Weaviate Cloud's capacity/cost characteristics for this project's corpus size.
+
+**Weaviate capacity research**: measured the real corpus directly rather than estimating (19
+documents, 2,601 chunks, 384-dim vectors) and cross-checked the math against the actual FAISS
+index file size (2,601 x 384 x 4 bytes = 3.81 MiB, matching the real 3,995,181-byte file almost
+exactly -- confirms the formula before using it for projections). Weaviate Cloud's Free plan (100K
+objects / 1GB memory / 10GB disk, no card, per weaviate.io/pricing) and Pinecone's Starter plan (2GB
+storage, no card, per pinecone.io/pricing) were both fetched from their current official pricing
+pages rather than recalled from training data or trusted from SEO-aggregator search results (an
+initial WebSearch surfaced third-party blog posts with internally contradictory numbers for
+Weaviate's sandbox tier -- discarded in favor of the vendor's own page). Conclusion handed back to
+the user: at the current corpus size both free tiers have enormous headroom (roughly 1% of
+Weaviate's free memory allowance even at 10x today's corpus), so tier limits aren't a real near-term
+constraint for this project.
+
+**Weaviate API research** (same rigor as the Pinecone research -- installed `weaviate-client`
+into a throwaway venv outside the project, used `inspect.signature()`/direct source reads against
+the real v4.23.0 package rather than guessing): confirmed the v4 client is a complete rewrite from
+the older v3 client (so most older Weaviate tutorials online are stale), that `connect_to_embedded()`
+explicitly rejects Windows in its own source (`check_supported_platform()` raises for
+`platform.system() == "Windows"`), and that Docker itself isn't installed on this dev machine
+(`docker: command not found`) -- so self-hosted Weaviate has a real setup cost here beyond "no
+account needed." The user's follow-up decision was to target **Weaviate Cloud**, not self-hosted,
+resolving that question.
+
+**User asked for a synthesis before deciding further**: "what else should be considered, and what's
+the impact of switching between backends?" Answered without touching any code, covering: the direct
+tension between cloud vector storage and this project's existing offline-first design intent
+(`embeddings.py`'s docstring already documents choosing local embeddings specifically because
+future documents may contain proprietary content -- pushing vectors to a third party cuts against
+that reasoning even though raw text stays local); latency/reliability moving from in-process to a
+real network dependency; the `faiss_row_id` column's name getting more strained with a third
+backend using it as pure filler; CI implications (real cloud credentials should never enter CI,
+especially right after the `key.txt` near-miss above); and, most substantively, that **switching
+`RAG_VECTOR_STORE_PROVIDER` does not migrate data** -- each backend only knows about vectors it was
+itself told to store, so flipping the setting silently strands every previously-ingested document
+(unsearchable, not deleted) until a migration script re-embeds stored chunk text from SQLite and
+re-upserts it into the newly active backend. That script doesn't exist yet. The user's decision:
+build the three-way switch now, defer the migration script as its own item -- **Phase 5a**.
+
+**Implementation, extending the Pinecone work above to three backends** rather than writing
+Weaviate support as a separate parallel path:
+- `config.py`: added `weaviate_cluster_url`, `weaviate_api_key`, `weaviate_collection_name`
+  (default `ConstructionRagChunk`) alongside the existing Pinecone settings.
+- `_weaviate_collection()`: same lazy-cached-seam shape as `_pinecone_index()` -- connects via
+  `weaviate.connect_to_weaviate_cloud(cluster_url=, auth_credentials=Auth.api_key(...))` (Cloud
+  only, per the user's decision above, not `connect_to_local()`), creates the collection
+  idempotently with `vectorizer_config=Configure.Vectorizer.none()` (we supply vectors ourselves,
+  same reasoning as Pinecone's plain index) and `vector_index_config=Configure.VectorIndex.hnsw(
+  distance_metric=VectorDistances.COSINE)` for score-scale parity with FAISS/Pinecone.
+- **ID scheme wrinkle unique to Weaviate**: Weaviate requires a UUID per object, but `chunk_id` is
+  an arbitrary string, so `weaviate.util.generate_uuid5(chunk_id)` deterministically derives one
+  (same chunk_id always maps to the same UUID, so delete needs no stored reverse mapping) --
+  and `chunk_id` is *also* stored as an object property purely so a query result can be read back
+  to its original chunk_id directly, without decoding the one-way UUID hash.
+- `add_document()`: Weaviate branch calls `collection.data.insert_many([DataObject(uuid=
+  generate_uuid5(chunk_id), properties={"chunk_id": chunk_id}, vector=...), ...])` -- a single
+  bulk call, same shape as Pinecone's `upsert(vectors=[...])`. Falls through to the same
+  `faiss_row_id` filler-value logic already added for Pinecone (that logic keys off "was a real
+  row_id computed," not off which non-FAISS provider is active, so it generalized to a third
+  backend with no changes).
+- `_search_weaviate()`: `collection.query.near_vector(near_vector=, limit=, return_metadata=
+  MetadataQuery(distance=True), return_properties=["chunk_id"])`, then the same chunk_id-based
+  SQLite join and is_latest filter as `_search_pinecone()`. One real behavioral difference from
+  Pinecone: **Weaviate returns cosine distance, not similarity** -- converted via `score = 1.0 -
+  distance` so scores land on the same scale the confidence-badge thresholds are already tuned
+  against (verified this conversion is exact, not approximate, since embeddings.py's vectors are
+  already unit-normalized).
+- `delete_document()`: Weaviate branch uses `collection.data.delete_many(where=Filter.by_id()
+  .contains_any([generate_uuid5(cid) for cid in chunk_ids]))` -- a real bulk delete by id, same
+  no-orphan-accumulation property Pinecone already has, extended to `compact_index()`'s guard
+  (raises for *any* non-FAISS provider, not just Pinecone by name).
+
+**Tests**: 4 new cases mirroring the Pinecone ones exactly, against a `_FakeWeaviateCollection`
+(in-memory `{uuid: (chunk_id, vector)}` store, cosine-equivalent scoring via `np.dot` converted to
+a fake "distance" the same way the real conversion is undone in `_search_weaviate()`, no network)
+-- add+search round trip (asserting an exact match scores ~1.0 after the distance->similarity
+conversion), delete actually removes vectors from the fake collection, superseded documents still
+hidden, and `compact_index()` raising for Weaviate too. Backend tests: 103 passed → **107 passed**.
+Ran the full suite (not just the new cases) after the refactor, same regression-check discipline
+as the Pinecone change.
+
+**Not yet done**: real end-to-end verification against a live Weaviate Cloud cluster (needs the
+user's cluster URL + API key and the same explicit go-ahead the blocked Pinecone check needs) and
+the Phase 5a migration script itself. Both remain open.
+<!-- todo -->
