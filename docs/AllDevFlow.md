@@ -1588,3 +1588,134 @@ Re-ran the identical question unscoped immediately after and got back its usual 
 spread (`njac_5_23_2.pdf`, `njac_5_23_3.pdf`, `njac_5_23_6.pdf`), confirming the default (no
 selection) path is genuinely unchanged.
 <!-- todo -->
+
+## Subcode-amendment lists dilute embeddings for buried topics
+
+While trying the new document-scope picker, the user asked the app a real question: "Does NJ
+require sprinklers in new one- and two-family homes?" It answered "Not enough information" --
+plausible on its face, but worth checking against the real corpus before accepting it, per this
+project's usual practice of verifying rather than assuming a "can't answer" response is correct.
+
+**It was wrong.** The real answer is fully present in the ingested corpus: `N.J.A.C.
+5:23-3.21(c).15` (part of the "One- and two-family dwelling subcode," which adopts the IRC with NJ
+amendments) explicitly states *"Section R309.2, One- and two-family dwellings automatic sprinkler
+systems, shall be deleted. Section R309.2.1 shall be retained."* -- i.e. NJ does not require
+sprinklers in standalone one/two-family homes (townhouses keep a sprinkler mandate under the
+adjacent, retained R309.1). Reproduced directly against the live app and confirmed the miss: that
+chunk scored 0.428 against the question and didn't even place in the top 30 search results, while
+several genuinely irrelevant chunks (elevator fire-alarm sections, a statute about lawn-sprinkler
+rain sensors) scored 0.5-0.63 and crowded it out.
+
+### Root cause
+
+`N.J.A.C. 5:23-3.21(c).15` is a single numbered item that adopts the IRC and then lists roughly 37
+unrelated NJ-specific amendments to it (storm shelters, address numbering, townhouse sprinklers,
+one/two-family sprinklers, egress windows, stairway riser dimensions, monitoring systems...), each
+marked with its own lowercase roman numeral (`i.`, `ii.`, ... `xxi.`, `xxii.`...). Confirmed this
+structure by re-extracting the raw PDF text directly with `app/extractors.py`'s `extract_pdf_pages`
+rather than trusting the already-chunked/whitespace-collapsed text in SQLite: the roman-numeral
+markers really do sit at the start of their own line in the raw extracted text --
+`\nxxi. Section R309.2, ...\nxxii. Section R310.2.2, ...` -- the exact same line-start convention
+`njac.py`'s existing `LETTERED_SUB_RE`/`NUMBERED_SUB_RE` already rely on. (First assumed these
+markers were embedded inline mid-paragraph, based on reading the post-chunking chunk text, where
+`generic.py`'s `split_sentences()` had already collapsed all whitespace to single spaces and
+destroyed the original line breaks -- re-extracting the *raw* PDF text directly was necessary to
+see the real structure and avoid designing a fix around the wrong assumption.)
+
+Because item 15 is too large (`_legal_doc.py`'s `MAX_CHUNK_WORDS = 500`) and has no *numbered*
+sub-structure of its own to split on, it fell straight to the level-4 fallback,
+`_split_oversized_text()`, which groups by raw sentence-count with zero awareness of the
+roman-numeral boundaries -- so ~15-17 unrelated amendments ended up sharing one embedding, exactly
+the "topically unrelated items diluting each other" problem `MIN_GROUP_WORDS` already exists to
+prevent one level up, at the numbered-item split.
+
+**Scope, confirmed empirically against the real corpus** (SQL against
+`backend/storage/metadata.sqlite3`, not guessed) before writing any fix: 81 chunks corpus-wide came
+from this level-4 fallback, 45 of them in `njac_5_23_3.pdf` (the subcodes chapter -- Building,
+Plumbing, Electrical, Energy, Mechanical, One-two-family, Fuel gas subcodes all adopt a model code
+this same way). Confirmed `statute.py`'s corpus (`52_27D_119.pdf`) has zero instances of this
+pattern -- an NJAC-subcode-specific structure, not something the shared engine needs for both
+formats. A spot-check of a sample from the *other* 36 chunks (a `njac_5_23_4.pdf` fee schedule)
+looked like single-topic content rather than multi-topic dilution, and that finding made it into
+the plan presented for approval -- **it turned out to be wrong** (see below), caught only once the
+fix was actually run against the real corpus, not before.
+
+### Fix
+
+Added one more level to `_legal_doc.py`'s recursive split (section → lettered → numbered → roman
+→ sentence-level fallback, up from four levels): a single oversized numbered item that has its own
+internal roman-numeral markers now splits and regroups on those first, via a new
+`_chunk_oversized_numbered_item()` step, before ever reaching sentence-level grouping. Reused the
+*exact* `MIN_GROUP_WORDS`-aware regrouping algorithm the numbered-item level already had --
+extracted out of `_chunk_lettered_piece()` into a shared `_group_and_chunk()` helper parameterized
+by the marker regex and what to do with a still-oversized single piece, rather than duplicating the
+same ~15-line loop a second time.
+
+Opt-in and NJAC-only by construction: a new `LegalDocConfig.roman_sub_re: re.Pattern | None = None`
+field, left `None` in `statute.py` and set in `njac.py` to `re.compile(r"(?m)^([ivxlcdm]+)\.\s")` --
+the same line-start-anchored convention as the existing lettered/numbered patterns. New citation
+format extends the existing one level deeper: `{sub}.{num}.{roman}` for a single roman item,
+`{sub}.{num}.{roman}+` for a merged group -- the sprinkler provision is now citable as
+`N.J.A.C. 5:23-3.21(c).15.xxi+` instead of being buried inside an opaque `...15 (2)`.
+
+**Tests**: added `test_njac_chunk_splits_an_oversized_numbered_item_on_roman_numerals` in
+`test_chunkers.py`, modeled directly on the real sprinkler case (an oversized item with several
+roman-numeral sub-items, verifying the split/regroup/citation behavior). The existing
+`test_njac_chunk_splits_a_single_oversized_numbered_item` (an item with *no* roman-numeral
+structure) already served as the regression guard proving the old fallback path is untouched when
+there's nothing to split on -- confirmed by hand-tracing it before running anything: its synthetic
+content is one continuous repeated-sentence blob with no embedded roman-numeral lines, so
+`_split_on(ROMAN_SUB_RE, ...)` correctly finds zero matches and falls through exactly as before.
+Backend tests: 113 → **114 passed**.
+
+### Re-ingestion and live verification
+
+This project has no schema-migration tooling -- a chunker change only takes effect on already-
+ingested documents via a full re-ingest. Backed up `backend/storage/` first (`storage.bak-20260905_143240/`, matching this project's
+existing backup-naming convention already covered by `.gitignore`, left in place as a safety net),
+stopped the two locally-running dev `uvicorn`
+processes (Windows won't let a chunker rewrite `metadata.sqlite3`/`faiss.index` cleanly while a
+server has them open), then wrote a one-off script that read each of the 20 real raw files from the
+backup and re-ran them through the real `ingestion.ingest_document()` pipeline (extract → chunk →
+embed → `add_document()`) -- the same path a real `/upload` takes, just without the HTTP layer.
+All 20 re-ingested cleanly; corpus grew from 2,601 to **2,883 chunks** (more, smaller, better-
+bounded chunks -- the intended effect). Restarted the port-8000 dev server afterward so the user's
+environment was left as found.
+
+Re-ran the exact reproduction from the investigation against the freshly re-ingested corpus: the
+sprinkler chunk moved from **not in the top 30** to **rank #3** (score 0.603, up from 0.428) --
+comfortably inside any real `top_k`. Confirmed via `vector_store.search()` directly, and again via
+a live `/query` call with default `top_k=5`, where the correct chunk (`N.J.A.C.
+5:23-3.21(c).15.xxi+`) does appear among the citations.
+
+**The scope claim above turned out to be incomplete**: spot-checking one fee-schedule chunk
+(`N.J.A.C. 5:23-4.20(c).2`, Department fees) before writing the fix suggested the other 36
+non-Subchapter-3 oversized chunks were single-topic and untouched by this bug -- but that chunk
+*also* uses roman-numeral sub-items internally (fee categories: `i.` building volume, `ii.`
+plumbing fixtures, `iii.` electrical, `iv.` sprinklers/detectors) and got split the same way after
+re-ingestion. Verified this is a genuine improvement, not a regression: concatenated the old and
+new chunks' text back together and confirmed byte-for-byte identical content (2,032 words either
+way, zero data loss), with the new chunks sensibly sized (77-497 words each) and each now scoped to
+one fee category instead of several sharing a chunk -- e.g. the sprinkler-fee line item is now its
+own focused ~300-word chunk. The lesson: a "spot check" of one chunk's first paragraph doesn't
+prove the rest of a 500-word chunk has no internal structure -- the actual re-ingestion run was the
+real test, not the sampling done during scoping.
+
+### A separate, still-open finding: the LLM isn't drawing the inference
+
+Re-running the *exact* live `/query` call after the fix (not just the raw `vector_store.search()`
+check) surfaced something new: the correct chunk is now in the retrieved context, confirmed by
+reconstructing the exact context block `build_context_block()` sends to the LLM -- but the local
+Ollama model (`llama3.1:8b`) still answered "Not enough information."
+
+This is a genuinely different problem from everything above: the retrieval bug is fixed (the right
+text is right there in the prompt), but the small local model isn't reliably drawing the "this
+provision was deleted → therefore not required" inference from terse legislative "shall be deleted"
+phrasing, especially with several *other* sprinkler-related-but-irrelevant chunks (nursing home/day
+care sprinkler exceptions, mixed-use building rules) also in context as plausible-looking
+distractors. Not fixed here -- it's a model-capability/prompt-engineering question distinct from
+this investigation's chunking scope, and changing the system prompt to push the model toward this
+kind of inference would affect every answer, not just this one case, so it deserves its own
+deliberate decision rather than a reflexive tweak. Recorded as an open finding, not yet triaged into
+the backlog as a separate item.
+<!-- todo -->

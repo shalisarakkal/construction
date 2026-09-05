@@ -13,8 +13,10 @@ Recursive split order when a section is too large:
   1. whole section (if <= MAX_CHUNK_WORDS)
   2. split on lettered subsections
   3. split an oversized lettered subsection further on numbered items
-  4. split an oversized single item (or a lettered piece with no numbered
-     items at all) at the sentence level -- no more structure to rely on
+  4. split an oversized single numbered item further on roman-numeral
+     sub-items, if it has any (NJAC-only -- see LegalDocConfig.roman_sub_re)
+  5. split an oversized single item (or a lettered/roman piece with no
+     further structure) at the sentence level -- no more structure to rely on
 """
 
 from dataclasses import dataclass
@@ -56,6 +58,16 @@ class LegalDocConfig:
     numbered_sub_re: re.Pattern  # 1 group: the number, matches at line start
     page_boilerplate_patterns: list[re.Pattern]
     cross_ref_res: list[re.Pattern]
+    # Optional 4th split level, below numbered items: a single numbered item
+    # that's still oversized may itself be a list of unrelated sub-items
+    # marked with lowercase roman numerals ("i.", "ii.", ... "xxi.") -- found
+    # live in NJAC's subcode-adoption sections (each adopts a model code,
+    # e.g. the IBC, then lists dozens of unrelated NJ amendments to it this
+    # way). Left None for statute.py -- confirmed zero real instances there,
+    # so there's nothing to gain and real risk to a working chunker from
+    # turning this on where it was never needed. See docs/AllDevFlow.md's
+    # "subcode-amendment lists dilute embeddings" investigation, 2026-09-05.
+    roman_sub_re: re.Pattern | None = None
 
 
 def _extract_references(text: str, cfg: LegalDocConfig) -> list[str]:
@@ -170,6 +182,79 @@ def _split_oversized_text(doc_id: str, title: str, header: str, citation: str, t
     return chunks
 
 
+def _group_and_chunk(doc_id: str, title: str, header: str, base_citation: str,
+                      pieces: list[str], marker_re: re.Pattern, cfg: LegalDocConfig,
+                      on_oversized_single) -> list[dict]:
+    """Regroups consecutive small pieces (split on marker_re -- numbered
+    items, or one level deeper, roman-numeral items within a numbered item)
+    up to MAX_CHUNK_WORDS instead of one chunk per item, same MIN_GROUP_WORDS-
+    aware algorithm shared by every level of this recursive split.
+
+    on_oversized_single(piece_text, item_citation) is called for a lone item
+    that's still too big on its own -- the caller decides what "no more
+    structure to split on" means at its level (recurse one level deeper, or
+    give up and group by sentence)."""
+    chunks = []
+    group: list[str] = []
+    group_words = 0
+
+    def flush():
+        nonlocal group, group_words
+        if not group:
+            return
+        # A group can start with intro text ahead of the first real item --
+        # scan the whole group for the first real marker rather than
+        # assuming group[0] is one, so intro text doesn't produce a "?"
+        # citation.
+        start_label = "?"
+        for member in group:
+            match = marker_re.match(member)
+            if match:
+                start_label = match.group(1)
+                break
+        item_citation = f"{base_citation}.{start_label}" if len(group) == 1 else f"{base_citation}.{start_label}+"
+        text = f"{header} {item_citation}\n" + "\n".join(group)
+        if len(group) == 1 and len(text.split()) > MAX_CHUNK_WORDS:
+            chunks.extend(on_oversized_single(group[0], item_citation))
+        else:
+            chunks.append(_make_chunk(doc_id, f"{cfg.citation_prefix} {item_citation}", title, text, cfg))
+        group = []
+        group_words = 0
+
+    for item in pieces:
+        words = len(item.split())
+        # Close the current group before adding this item if it's already
+        # substantial enough to stand alone (MIN_GROUP_WORDS) or would
+        # overflow the hard cap -- either way, don't dilute it further.
+        if group and (group_words >= MIN_GROUP_WORDS or group_words + words > MAX_CHUNK_WORDS):
+            flush()
+        group.append(item)
+        group_words += words
+    flush()
+    return chunks
+
+
+def _chunk_oversized_numbered_item(doc_id: str, title: str, header: str, item_citation: str,
+                                    item_text: str, cfg: LegalDocConfig) -> list[dict]:
+    """A single numbered item that's still oversized on its own. Before
+    giving up to sentence-level grouping, check whether it's itself a list
+    of unrelated roman-numeral sub-items (see LegalDocConfig.roman_sub_re's
+    docstring) and, if so, split and regroup on those first -- same
+    MIN_GROUP_WORDS-aware algorithm as the numbered-item level, one level
+    deeper, so topically unrelated amendments stop sharing an embedding."""
+    if cfg.roman_sub_re is not None:
+        roman_pieces = _split_on(cfg.roman_sub_re, item_text)
+        if len(roman_pieces) > 1:
+            def on_oversized_roman_item(roman_text, roman_citation):
+                return _split_oversized_text(doc_id, title, header, roman_citation, roman_text, cfg)
+
+            return _group_and_chunk(doc_id, title, header, item_citation, roman_pieces,
+                                     cfg.roman_sub_re, cfg, on_oversized_roman_item)
+    # No roman-numeral structure to split on -- no more structure left,
+    # fall back to sentence-level grouping.
+    return _split_oversized_text(doc_id, title, header, item_citation, item_text, cfg)
+
+
 def _chunk_lettered_piece(doc_id: str, citation_num: str, title: str, header: str, piece: str,
                            cfg: LegalDocConfig) -> list[dict]:
     """piece is one lettered subsection block (or the whole section if no
@@ -191,48 +276,11 @@ def _chunk_lettered_piece(doc_id: str, citation_num: str, title: str, header: st
         # sentence-level grouping rather than one oversized chunk.
         return _split_oversized_text(doc_id, title, header, sub_citation, piece, cfg)
 
-    chunks = []
-    group: list[str] = []
-    group_words = 0
+    def on_oversized_numbered_item(item_text, item_citation):
+        return _chunk_oversized_numbered_item(doc_id, title, header, item_citation, item_text, cfg)
 
-    def flush():
-        nonlocal group, group_words
-        if not group:
-            return
-        # A group can start with intro text ahead of the first numbered item
-        # -- scan the whole group for the first real numbered item rather
-        # than assuming group[0] is one, so that intro text doesn't produce
-        # a "?" citation.
-        start_num = "?"
-        for member in group:
-            num_match = cfg.numbered_sub_re.match(member)
-            if num_match:
-                start_num = num_match.group(1)
-                break
-        item_citation = f"{sub_citation}.{start_num}" if len(group) == 1 else f"{sub_citation}.{start_num}+"
-        text = f"{header} {item_citation}\n" + "\n".join(group)
-        if len(group) == 1 and len(text.split()) > MAX_CHUNK_WORDS:
-            # A single item (or a single oversized intro block with no
-            # numbered item of its own -- the "?" citation case) that's
-            # still too big on its own -- no lettered/numbered structure
-            # left to split on, fall back to sentence-level grouping.
-            chunks.extend(_split_oversized_text(doc_id, title, header, item_citation, group[0], cfg))
-        else:
-            chunks.append(_make_chunk(doc_id, f"{cfg.citation_prefix} {item_citation}", title, text, cfg))
-        group = []
-        group_words = 0
-
-    for item in numbered_pieces:
-        words = len(item.split())
-        # Close the current group before adding this item if it's already
-        # substantial enough to stand alone (MIN_GROUP_WORDS) or would
-        # overflow the hard cap -- either way, don't dilute it further.
-        if group and (group_words >= MIN_GROUP_WORDS or group_words + words > MAX_CHUNK_WORDS):
-            flush()
-        group.append(item)
-        group_words += words
-    flush()
-    return chunks
+    return _group_and_chunk(doc_id, title, header, sub_citation, numbered_pieces,
+                             cfg.numbered_sub_re, cfg, on_oversized_numbered_item)
 
 
 def _chunk_section(doc_id: str, citation_num: str, title: str, operative_text: str,

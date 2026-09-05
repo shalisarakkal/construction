@@ -294,6 +294,33 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       scoped to one real document returned chunks from only that document; the same question
       unscoped still returned its usual multi-document spread. Backend tests: 107 → 113 passed.
       Frontend tests: 51 → 58 passed.
+- [x] **Fixed a real retrieval bug: subcode-amendment lists diluting embeddings.** User asked
+      "Does NJ require sprinklers in new one- and two-family homes?" and got "Not enough
+      information" even though the answer (NJ deletes the IRC's R309.2 mandate for standalone
+      one/two-family homes, keeps it for townhouses) is fully present in the corpus. Root cause:
+      `N.J.A.C. 5:23-3.21(c).15` lists ~37 unrelated NJ amendments to the adopted IRC, each marked
+      with its own roman numeral (`i.`, `ii.`, ... `xxi.`...) — too large to stay one chunk, but
+      with no *numbered* sub-structure to split on, so it fell to sentence-level grouping with zero
+      awareness of the roman-numeral boundaries, letting ~15-17 unrelated amendments dilute one
+      embedding. Confirmed empirically: the correct chunk scored 0.428 and didn't even place in the
+      top 30 results before the fix. Added a new split level to `_legal_doc.py` (opt-in via
+      `LegalDocConfig.roman_sub_re`, `None` for `statute.py` — confirmed zero real instances of this
+      pattern in the statute corpus) that splits and regroups on roman-numeral markers the same
+      `MIN_GROUP_WORDS`-aware way numbered items already are, extracted into a shared
+      `_group_and_chunk()` helper reused at both levels. Corpus re-ingested (20 docs, 2,601 → 2,883
+      chunks); the fix moved the correct chunk from outside the top 30 to **rank #3** (score 0.603).
+      Turned out to apply more broadly than initially scoped -- fee-schedule/permit-fee sections in
+      other subchapters also use this roman-numeral structure (e.g. `N.J.A.C. 5:23-4.20(c).2`'s
+      fee-category breakdown), and now split the same way with zero content loss (verified
+      word-for-word identical concatenated text before/after). Backend tests: 113 → 114 passed.
+      **New, separate finding surfaced by this fix**: even with the correct chunk now in context,
+      the local Ollama model (`llama3.1:8b`) still answered "Not enough information" for the live
+      `/query` call -- the retrieval bug is fixed (confirmed via direct `vector_store.search()`
+      calls and by inspecting the exact context block sent to the LLM), but the small local model
+      isn't reliably drawing the "provision deleted → not required" inference from terse legislative
+      "shall be deleted" phrasing. This is a distinct LLM-synthesis limitation, not a retrieval or
+      chunking issue, and is **not yet fixed** -- see `docs/AllDevFlow.md` for detail; recorded here
+      rather than the backlog section since it was found mid-investigation, not separately triaged.
 
 ## Out of scope (explicit decisions, not oversights)
 

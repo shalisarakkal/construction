@@ -26,6 +26,12 @@ SUBCHAPTER_NUM_RE = r"5:23-\d+[A-Za-z]?(?:\.\d+)?"
 SECTION_HEADING_RE = re.compile(rf"^§\s*({SUBCHAPTER_NUM_RE})\s+(.+)$", re.MULTILINE)
 LETTERED_SUB_RE = re.compile(r"(?m)^\(([a-z])\)\s")
 NUMBERED_SUB_RE = re.compile(r"(?m)^(\d+)\.\s")
+# One level below a numbered item: NJAC's subcode-adoption sections (Building,
+# Plumbing, Electrical, ... One- and two-family dwelling subcode) each adopt
+# a model code, then list dozens of unrelated NJ amendments to it marked this
+# way -- see LegalDocConfig.roman_sub_re's docstring and docs/AllDevFlow.md's
+# "subcode-amendment lists dilute embeddings" investigation, 2026-09-05.
+ROMAN_SUB_RE = re.compile(r"(?m)^([ivxlcdm]+)\.\s")
 CROSSREF_RE = re.compile(rf"N\.J\.A\.C\.\s*{SUBCHAPTER_NUM_RE}(?:\([a-z0-9]+\))*")
 STANDARD_REF_RE = re.compile(r"ASME\s+A1[0-9]\.\d(?:-\d{4})?|ICC\s+A117\.1")
 
@@ -52,6 +58,7 @@ _CONFIG = LegalDocConfig(
     numbered_sub_re=NUMBERED_SUB_RE,
     page_boilerplate_patterns=PAGE_BOILERPLATE_PATTERNS,
     cross_ref_res=[CROSSREF_RE, STANDARD_REF_RE],
+    roman_sub_re=ROMAN_SUB_RE,
 )
 
 

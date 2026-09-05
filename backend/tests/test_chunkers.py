@@ -222,12 +222,60 @@ def test_njac_chunk_splits_oversized_history_into_multiple_chunks():
     ]
 
 
+def test_njac_chunk_splits_an_oversized_numbered_item_on_roman_numerals():
+    # Real-world case: NJAC's subcode-adoption sections (Building, Plumbing,
+    # One- and two-family dwelling subcode, ...) each adopt a model code in
+    # one numbered item, then list dozens of unrelated NJ amendments to it
+    # marked with roman numerals -- e.g. N.J.A.C. 5:23-3.21(c).15 lists ~37
+    # unrelated amendments (storm shelters, sprinklers, egress windows, ...)
+    # this way. Splitting only at the sentence level (no roman-numeral
+    # awareness) let ~15 unrelated topics share one embedding, burying a
+    # real user question ("does NJ require sprinklers in one/two-family
+    # homes") below 30+ irrelevant chunks -- see docs/AllDevFlow.md's
+    # "subcode-amendment lists dilute embeddings" investigation, 2026-09-05.
+    item = " ".join(["requirement"] * 200)
+    huge_item = (
+        "2. The following amendments apply:\n"
+        f"i. {item}\n"
+        f"ii. {item}\n"
+        f"iii. {item}\n"
+    )
+    text = (
+        "N.J.A.C. 5:23-3.21\n\n"
+        "§ 5:23-3.21 One- and two-family dwelling subcode\n"
+        f"(c)\n1. Short first item.\n{huge_item}3. Short third item.\n"
+        "End of Document"
+    )
+
+    chunks = njac_chunk("doc1", text)
+
+    roman_chunks = [c for c in chunks if c["citation"].startswith("N.J.A.C. 5:23-3.21(c).2.")]
+    assert [c["citation"] for c in roman_chunks] == [
+        "N.J.A.C. 5:23-3.21(c).2.i+",
+        "N.J.A.C. 5:23-3.21(c).2.ii",
+        "N.J.A.C. 5:23-3.21(c).2.iii",
+    ]
+    assert all(c["word_count"] <= 500 for c in roman_chunks)
+    # The intro line ahead of the first roman item ("The following
+    # amendments apply:") merges into item i's chunk rather than being
+    # dropped, same leading-piece handling _split_on already guarantees at
+    # every other level.
+    assert "following amendments apply" in roman_chunks[0]["text"]
+    # Items 1 and 3 (no roman-numeral structure of their own) are untouched.
+    assert any(c["citation"] == "N.J.A.C. 5:23-3.21(c).1+" for c in chunks)
+    assert any(c["citation"] == "N.J.A.C. 5:23-3.21(c).3" for c in chunks)
+
+
 def test_njac_chunk_splits_a_single_oversized_numbered_item():
     # Regression test: a single numbered item with no further lettered/
     # romanette/numbered sub-structure to split on used to become one
     # oversized chunk regardless of size -- found live in the real corpus,
     # up to 2,803 words (N.J.A.C. 5:23-3.14(b).31). See
     # _split_oversized_text in app/chunkers/njac.py.
+    #
+    # Also doubles as the regression guard for the roman-numeral split added
+    # above: this item has no roman-numeral structure at all, so it must
+    # still fall all the way through to sentence-level grouping unchanged.
     sentence = "This is a sentence about a specific requirement. "
     huge_item = "2. " + (sentence * 150)  # ~1650 words, one numbered item
     text = (
