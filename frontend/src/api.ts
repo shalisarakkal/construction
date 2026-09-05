@@ -47,11 +47,13 @@ export function getDocumentVersions(docId: string): Promise<DocumentSummary[]> {
   );
 }
 
-export function askQuestion(question: string, topK: number): Promise<QueryResponse> {
+export function askQuestion(question: string, topK: number, docIds?: string[]): Promise<QueryResponse> {
+  const body: Record<string, unknown> = { question, top_k: topK };
+  if (docIds && docIds.length > 0) body.doc_ids = docIds;
   return fetch(`${API_BASE}/query`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, top_k: topK }),
+    body: JSON.stringify(body),
   }).then((r) => unwrap<QueryResponse>(r));
 }
 

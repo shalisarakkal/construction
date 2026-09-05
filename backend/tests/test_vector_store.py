@@ -81,6 +81,37 @@ def test_search_hides_superseded_documents():
     assert titles == ["Doc One v2"]
 
 
+def test_search_with_doc_ids_scopes_to_requested_documents():
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc Two", _unit_vector(1), "hash2")
+    _add_doc("doc3", "Doc Three", _unit_vector(2), "hash3")
+
+    # A query vector closest to doc1, but scoped to doc2/doc3 only -- doc1
+    # must not come back even though it would otherwise be the top hit.
+    results = vector_store.search(_unit_vector(0), top_k=5, doc_ids=["doc2", "doc3"])
+
+    titles = {doc_title for _chunk, doc_title, _score in results}
+    assert titles == {"Doc Two", "Doc Three"}
+
+
+def test_search_with_empty_doc_ids_searches_everything():
+    """[] means "nothing explicitly selected" (the frontend's default), not
+    "search nothing" -- same as doc_ids=None."""
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+
+    results = vector_store.search(_unit_vector(0), top_k=5, doc_ids=[])
+
+    assert [title for _chunk, title, _score in results] == ["Doc One"]
+
+
+def test_search_with_doc_ids_matching_nothing_returns_empty():
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+
+    results = vector_store.search(_unit_vector(0), top_k=5, doc_ids=["does-not-exist"])
+
+    assert results == []
+
+
 def test_delete_document_removes_metadata_but_keeps_faiss_vector():
     _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
     index_before = vector_store._load_or_create_index().ntotal
@@ -166,16 +197,20 @@ class _FakePineconeIndex:
 
     def __init__(self):
         self.vectors: dict[str, list[float]] = {}
+        self.metadata: dict[str, dict] = {}
         self.deleted_ids: list[str] = []
 
     def upsert(self, vectors):
-        for chunk_id, values in vectors:
+        for chunk_id, values, *rest in vectors:
             self.vectors[chunk_id] = values
+            self.metadata[chunk_id] = rest[0] if rest else {}
 
-    def query(self, *, vector, top_k, include_values=False, include_metadata=False):
+    def query(self, *, vector, top_k, include_values=False, include_metadata=False, filter=None):
+        allowed_doc_ids = set(filter["doc_id"]["$in"]) if filter else None
         scored = [
             (chunk_id, float(np.dot(values, vector)))
             for chunk_id, values in self.vectors.items()
+            if allowed_doc_ids is None or self.metadata.get(chunk_id, {}).get("doc_id") in allowed_doc_ids
         ]
         scored.sort(key=lambda pair: pair[1], reverse=True)
         matches = [_FakeScoredVector(cid, score) for cid, score in scored[:top_k]]
@@ -185,6 +220,7 @@ class _FakePineconeIndex:
         self.deleted_ids.extend(ids)
         for chunk_id in ids:
             self.vectors.pop(chunk_id, None)
+            self.metadata.pop(chunk_id, None)
 
 
 @pytest.fixture
@@ -203,6 +239,15 @@ def test_pinecone_add_and_search_round_trip(pinecone_provider):
 
     assert [title for _chunk, title, _score in results] == ["Doc One", "Doc Two"]
     assert pinecone_provider.vectors.keys() == {"doc1_0", "doc2_0"}
+
+
+def test_pinecone_search_with_doc_ids_scopes_to_requested_documents(pinecone_provider):
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc Two", _unit_vector(1), "hash2")
+
+    results = vector_store.search(_unit_vector(0), top_k=5, doc_ids=["doc2"])
+
+    assert [title for _chunk, title, _score in results] == ["Doc Two"]
 
 
 def test_pinecone_delete_document_removes_vectors_from_index(pinecone_provider):
@@ -257,7 +302,9 @@ class _FakeWeaviateData:
 
     def insert_many(self, objects):
         for obj in objects:
-            self._store[str(obj.uuid)] = (obj.properties["chunk_id"], obj.vector)
+            self._store[str(obj.uuid)] = (
+                obj.properties["chunk_id"], obj.properties.get("doc_id"), obj.vector
+            )
 
     def delete_many(self, where):
         for uuid in where.value:
@@ -268,12 +315,15 @@ class _FakeWeaviateQuery:
     def __init__(self, store):
         self._store = store
 
-    def near_vector(self, *, near_vector, limit, return_metadata=None, return_properties=None):
+    def near_vector(self, *, near_vector, limit, return_metadata=None, return_properties=None,
+                     filters=None):
+        allowed_doc_ids = set(filters.value) if filters else None
         # Cosine distance = 1 - cosine similarity; vectors here are unit
         # basis vectors, so a plain dot product is an exact cosine similarity.
         scored = [
             (uuid, chunk_id, 1.0 - float(np.dot(vector, near_vector)))
-            for uuid, (chunk_id, vector) in self._store.items()
+            for uuid, (chunk_id, doc_id, vector) in self._store.items()
+            if allowed_doc_ids is None or doc_id in allowed_doc_ids
         ]
         scored.sort(key=lambda triple: triple[2])
         objects = [
@@ -289,7 +339,7 @@ class _FakeWeaviateCollection:
     compute that key, so this fake exercises the same id-derivation code)."""
 
     def __init__(self):
-        self.store: dict[str, tuple[str, list[float]]] = {}
+        self.store: dict[str, tuple[str, str | None, list[float]]] = {}
         self.data = _FakeWeaviateData(self.store)
         self.query = _FakeWeaviateQuery(self.store)
 
@@ -310,8 +360,17 @@ def test_weaviate_add_and_search_round_trip(weaviate_provider):
 
     assert [title for _chunk, title, _score in results] == ["Doc One", "Doc Two"]
     assert results[0][2] == pytest.approx(1.0)  # exact match -> distance 0 -> score 1.0
-    stored_chunk_ids = {chunk_id for chunk_id, _vector in weaviate_provider.store.values()}
+    stored_chunk_ids = {chunk_id for chunk_id, _doc_id, _vector in weaviate_provider.store.values()}
     assert stored_chunk_ids == {"doc1_0", "doc2_0"}
+
+
+def test_weaviate_search_with_doc_ids_scopes_to_requested_documents(weaviate_provider):
+    _add_doc("doc1", "Doc One", _unit_vector(0), "hash1")
+    _add_doc("doc2", "Doc Two", _unit_vector(1), "hash2")
+
+    results = vector_store.search(_unit_vector(0), top_k=5, doc_ids=["doc2"])
+
+    assert [title for _chunk, title, _score in results] == ["Doc Two"]
 
 
 def test_weaviate_delete_document_removes_vectors_from_collection(weaviate_provider):
@@ -321,7 +380,7 @@ def test_weaviate_delete_document_removes_vectors_from_collection(weaviate_provi
     deleted = vector_store.delete_document("doc1")
 
     assert deleted is True
-    remaining_chunk_ids = {chunk_id for chunk_id, _vector in weaviate_provider.store.values()}
+    remaining_chunk_ids = {chunk_id for chunk_id, _doc_id, _vector in weaviate_provider.store.values()}
     assert remaining_chunk_ids == {"doc2_0"}
     results = vector_store.search(_unit_vector(0), top_k=5)
     assert [title for _chunk, title, _score in results] == ["Doc Two"]

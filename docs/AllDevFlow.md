@@ -1529,3 +1529,62 @@ tests: still 107 passed.
 All three vector-store backends (FAISS, Pinecone, Weaviate) are now verified against real,
 non-fake systems. Only the Phase 5a migration script remains unbuilt.
 <!-- todo -->
+
+## Scope Q&A to selected document(s)
+
+User asked whether a question could be answered "based only on" a chosen set of files, phrased
+initially around dropping files into a folder. That framing doesn't map onto this app -- documents
+are ingested one at a time via the upload page into a flat list, there's no filesystem-folder
+watching. Explained that gap in an exploratory answer and proposed the actual fit instead: a
+document multi-select in the existing UI. The user agreed, then asked for it to be planned out
+properly (plan mode) before any code was touched.
+
+**Design, per the approved plan**: `doc_ids: list[str] | None` added to `QueryRequest`, threaded
+through `vector_store.search()` into all three backends -- each handles it differently since only
+Pinecone/Weaviate support native metadata filtering:
+
+- **FAISS**: `IndexFlatIP` has no filtering at all, but it's an exact brute-force scan that computes
+  a score against *every* vector regardless of the requested `k` -- so `_search_faiss()` asks for
+  `k=index.ntotal` instead of `top_k` whenever `doc_ids` is given (free; the expensive part, scoring
+  every vector, already happens either way), filters matches to the requested doc_id set in Python,
+  and stops collecting once `top_k` survive the filter. Simpler and cheaper than maintaining
+  per-document sub-indexes for this corpus size.
+- **Pinecone**: real filtered search via `index.query(..., filter={"doc_id": {"$in": doc_ids}})`.
+  Required a real prerequisite change: `add_document()`'s Pinecone branch previously upserted plain
+  `(chunk_id, values)` pairs with *no metadata at all* -- switched to 3-tuples with a `{"doc_id":
+  doc_id}` metadata dict, since there was nothing to filter on before this.
+- **Weaviate**: real filtered search via `near_vector(..., filters=Filter.by_property("doc_id")
+  .contains_any(doc_ids))`. Same prerequisite gap: the collection schema only had a `chunk_id`
+  property; added a second `Property(name="doc_id", data_type=DataType.TEXT)` and started writing
+  it alongside `chunk_id` in `add_document()`'s Weaviate branch.
+
+Both cloud-backend changes only affect *newly ingested* chunks -- since production traffic runs on
+FAISS and the only vectors ever written to Pinecone/Weaviate were throwaway live-verification data
+(already deleted), there's no real backfill gap today. Noted as the same category of problem
+Phase 5a's future migration script already exists to solve, rather than opening a new backlog item.
+
+**Frontend**: new `DocumentScopePicker.tsx` -- fetches `listDocuments()` on mount (same pattern
+`SummaryPage.tsx` already uses), renders a checkbox per document with Select-all/Clear buttons and
+explicit "Leave none selected to search all documents" copy, reports the selected `Set<string>` up
+via `onChange`. Built as a sibling component to `QuestionBox` in `QAPage.tsx` rather than merged
+into it -- `QuestionBox` had 6 passing tests and zero API dependency before this, and stayed that
+way; `QAPage` owns the `docIds` state and passes it into `askQuestion()`, which only adds `doc_ids`
+to the request body when the array is non-empty (so an unscoped question's request body is
+byte-for-byte what it was before this feature existed).
+
+**Tests**: backend -- 3 new FAISS `doc_ids` cases (scopes correctly, `[]` treated as "search
+everything" not "search nothing," an unmatched doc_id returns `[]` rather than erroring), 1 each
+for the Pinecone/Weaviate fakes (extended to store and filter on `doc_id`, mirroring the real
+filter shape), 1 new `/query` router test. Backend: 107 → **113 passed**. Frontend -- new
+`DocumentScopePicker.test.tsx` (5 cases: renders nothing with no documents, renders a checkbox per
+document, toggle calls `onChange` correctly, Select-all/Clear work, load-failure shows an error),
+plus 2 new `QAPage.test.tsx` cases confirming `askQuestion` receives `[]` by default and the
+selected doc_id when one is checked. Frontend: 51 → **58 passed**.
+
+**Verified live** against the real FAISS-backed dev corpus (not just fakes/tests): asked the fence
+question scoped to a single real document (`njac_5_23_2.pdf`) via a direct API call -- all 5
+returned chunks came from that one document only, confirmed by checking every result's `doc_title`.
+Re-ran the identical question unscoped immediately after and got back its usual multi-document
+spread (`njac_5_23_2.pdf`, `njac_5_23_3.pdf`, `njac_5_23_6.pdf`), confirming the default (no
+selection) path is genuinely unchanged.
+<!-- todo -->

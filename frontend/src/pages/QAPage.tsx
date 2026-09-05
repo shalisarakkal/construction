@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { askQuestion } from "../api";
 import { QuestionBox } from "../components/QuestionBox";
+import { DocumentScopePicker } from "../components/DocumentScopePicker";
 import { AnswerCard } from "../components/AnswerCard";
 import { CitationList } from "../components/CitationList";
 import { ChunkResultList } from "../components/ChunkResultList";
@@ -10,13 +11,14 @@ export function QAPage() {
   const [result, setResult] = useState<QueryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [docIds, setDocIds] = useState<Set<string>>(new Set());
 
   async function handleAsk(question: string, topK: number) {
     setLoading(true);
     setError(null);
     setResult(null);
     try {
-      const res = await askQuestion(question, topK);
+      const res = await askQuestion(question, topK, Array.from(docIds));
       setResult(res);
     } catch (err) {
       setError((err as Error).message);
@@ -29,6 +31,7 @@ export function QAPage() {
   return (
     <div className="page">
       <h2>Ask a question</h2>
+      <DocumentScopePicker onChange={setDocIds} />
       <QuestionBox onAsk={handleAsk} disabled={loading} />
 
       {loading && <p className="loading-text">Generating answer… this can take a couple of minutes.</p>}

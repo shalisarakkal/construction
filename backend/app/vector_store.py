@@ -167,7 +167,10 @@ def _weaviate_collection():
     if not client.collections.exists(settings.weaviate_collection_name):
         client.collections.create(
             name=settings.weaviate_collection_name,
-            properties=[Property(name="chunk_id", data_type=DataType.TEXT)],
+            properties=[
+                Property(name="chunk_id", data_type=DataType.TEXT),
+                Property(name="doc_id", data_type=DataType.TEXT),
+            ],
             vector_config=Configure.Vectors.self_provided(
                 vector_index_config=Configure.VectorIndex.hfresh(distance_metric=VectorDistances.COSINE)
             ),
@@ -208,8 +211,10 @@ def add_document(doc_id: str, title: str, filename: str, chunker_used: str,
     versioning" section."""
     row_ids = None
     if settings.vector_store_provider == "pinecone":
-        chunk_ids = [c["chunk_id"] for c in chunks]
-        _pinecone_index().upsert(vectors=list(zip(chunk_ids, vectors.tolist())))
+        _pinecone_index().upsert(vectors=[
+            (chunk["chunk_id"], vector.tolist(), {"doc_id": doc_id})
+            for chunk, vector in zip(chunks, vectors)
+        ])
     elif settings.vector_store_provider == "weaviate":
         from weaviate.classes.data import DataObject
         from weaviate.util import generate_uuid5
@@ -217,7 +222,7 @@ def add_document(doc_id: str, title: str, filename: str, chunker_used: str,
         _weaviate_collection().data.insert_many([
             DataObject(
                 uuid=generate_uuid5(chunk["chunk_id"]),
-                properties={"chunk_id": chunk["chunk_id"]},
+                properties={"chunk_id": chunk["chunk_id"], "doc_id": doc_id},
                 vector=vector.tolist(),
             )
             for chunk, vector in zip(chunks, vectors)
@@ -468,23 +473,42 @@ def get_job(job_id: str) -> dict | None:
     return d
 
 
-def search(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]]:
-    """Returns list of (chunk_dict, doc_title, similarity_score)."""
+def search(
+    query_vector: np.ndarray, top_k: int, doc_ids: list[str] | None = None
+) -> list[tuple[dict, str, float]]:
+    """Returns list of (chunk_dict, doc_title, similarity_score).
+
+    doc_ids, when given, scopes the search to just those documents -- see
+    docs/AllDevFlow.md's "Scope Q&A to selected document(s)" section. An
+    empty list is treated the same as None (search everything), since the
+    frontend sends [] to mean "nothing explicitly selected," not "search
+    nothing."""
+    if not doc_ids:
+        doc_ids = None
     if settings.vector_store_provider == "pinecone":
-        return _search_pinecone(query_vector, top_k)
+        return _search_pinecone(query_vector, top_k, doc_ids)
     if settings.vector_store_provider == "weaviate":
-        return _search_weaviate(query_vector, top_k)
-    return _search_faiss(query_vector, top_k)
+        return _search_weaviate(query_vector, top_k, doc_ids)
+    return _search_faiss(query_vector, top_k, doc_ids)
 
 
-def _search_faiss(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]]:
+def _search_faiss(
+    query_vector: np.ndarray, top_k: int, doc_ids: list[str] | None
+) -> list[tuple[dict, str, float]]:
     index = _load_or_create_index()
     if index.ntotal == 0:
         return []
 
-    scores, row_ids = index.search(np.expand_dims(query_vector, axis=0), min(top_k, index.ntotal))
+    # IndexFlatIP is an exact brute-force scan -- it computes a score against
+    # every vector regardless of k, so asking for ntotal results instead of
+    # top_k costs nothing extra. Doing that (rather than a smaller k) is what
+    # makes post-hoc doc_id filtering below correct: a smaller k could drop
+    # every result from the requested document(s) before filtering ever runs.
+    k = index.ntotal if doc_ids else min(top_k, index.ntotal)
+    scores, row_ids = index.search(np.expand_dims(query_vector, axis=0), k)
     scores, row_ids = scores[0], row_ids[0]
 
+    doc_id_set = set(doc_ids) if doc_ids else None
     results = []
     with _connect() as conn:
         for score, row_id in zip(scores, row_ids):
@@ -495,6 +519,8 @@ def _search_faiss(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str,
             ).fetchone()
             if chunk_row is None:
                 continue
+            if doc_id_set is not None and chunk_row["doc_id"] not in doc_id_set:
+                continue
             doc_row = conn.execute(
                 "SELECT title, is_latest FROM documents WHERE doc_id = ?", (chunk_row["doc_id"],)
             ).fetchone()
@@ -504,12 +530,20 @@ def _search_faiss(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str,
                 # each document, same tolerance pattern as orphaned rows.
                 continue
             results.append((_row_to_chunk(chunk_row), doc_row["title"], float(score)))
+            if len(results) == top_k:
+                break
     return results
 
 
-def _search_pinecone(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]]:
+def _search_pinecone(
+    query_vector: np.ndarray, top_k: int, doc_ids: list[str] | None
+) -> list[tuple[dict, str, float]]:
+    query_kwargs = {}
+    if doc_ids:
+        query_kwargs["filter"] = {"doc_id": {"$in": doc_ids}}
     response = _pinecone_index().query(
-        vector=query_vector.tolist(), top_k=top_k, include_values=False, include_metadata=False
+        vector=query_vector.tolist(), top_k=top_k, include_values=False,
+        include_metadata=False, **query_kwargs,
     )
 
     results = []
@@ -529,14 +563,20 @@ def _search_pinecone(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, s
     return results
 
 
-def _search_weaviate(query_vector: np.ndarray, top_k: int) -> list[tuple[dict, str, float]]:
-    from weaviate.classes.query import MetadataQuery
+def _search_weaviate(
+    query_vector: np.ndarray, top_k: int, doc_ids: list[str] | None
+) -> list[tuple[dict, str, float]]:
+    from weaviate.classes.query import Filter, MetadataQuery
 
+    query_kwargs = {}
+    if doc_ids:
+        query_kwargs["filters"] = Filter.by_property("doc_id").contains_any(doc_ids)
     response = _weaviate_collection().query.near_vector(
         near_vector=query_vector.tolist(),
         limit=top_k,
         return_metadata=MetadataQuery(distance=True),
         return_properties=["chunk_id"],
+        **query_kwargs,
     )
 
     results = []

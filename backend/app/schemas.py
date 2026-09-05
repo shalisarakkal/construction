@@ -53,6 +53,7 @@ class JobStatusResponse(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     top_k: int = 5
+    doc_ids: list[str] | None = None
 
 
 class RetrievedChunk(BaseModel):

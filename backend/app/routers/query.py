@@ -23,7 +23,7 @@ router = APIRouter()
 def query(request: QueryRequest):
     top_k = request.top_k or settings.default_top_k
     query_vector = embed_query(request.question)
-    results = vector_store.search(query_vector, top_k)
+    results = vector_store.search(query_vector, top_k, doc_ids=request.doc_ids)
 
     citations = []
     for chunk, doc_title, _score in results:

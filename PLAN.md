@@ -277,6 +277,23 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       - Tests: 8 new (`ConfirmDialog.test.tsx`) + `DocumentList.test.tsx`'s delete tests rewritten
         to exercise the in-app dialog instead of mocking `window.confirm`, plus a new Escape-key
         test. Frontend tests: 43 → 51 passed.
+- [x] **Scope Q&A to selected document(s)** — user asked whether a question could be answered from
+      just a chosen set of files rather than the whole corpus; agreed direction was a document
+      multi-select in the existing UI (not folder-watching, which doesn't match how documents get
+      ingested here). New optional `doc_ids` on `QueryRequest`, threaded through `vector_store.
+      search()` into all three backends: FAISS filters in Python after a full `ntotal`-sized scan
+      (free — `IndexFlatIP` computes a score against every vector regardless of requested `k`, so
+      this costs nothing extra and is simpler than maintaining per-doc sub-indexes); Pinecone and
+      Weaviate both gained real native filtered search (`filter={"doc_id": {"$in": ...}}` /
+      `Filter.by_property("doc_id").contains_any(...)`), which required both to start storing
+      `doc_id` as metadata/a property at upsert time (previously only `chunk_id` was stored). New
+      `DocumentScopePicker` component (checkbox list + Select all/Clear, fetches `listDocuments()`
+      same as `SummaryPage`) added as a sibling to `QuestionBox` rather than folded into it, to
+      keep `QuestionBox`'s existing test suite untouched. Zero documents selected = search
+      everything (unchanged default behavior). Verified live against the real corpus: a question
+      scoped to one real document returned chunks from only that document; the same question
+      unscoped still returned its usual multi-document spread. Backend tests: 107 → 113 passed.
+      Frontend tests: 51 → 58 passed.
 
 ## Out of scope (explicit decisions, not oversights)
 

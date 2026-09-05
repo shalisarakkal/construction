@@ -72,6 +72,29 @@ def test_query_synthesizes_answer_when_llm_configured(client, monkeypatch):
     assert "egress" in captured["context_block"]
 
 
+def test_query_with_doc_ids_scopes_to_selected_documents(client, monkeypatch):
+    monkeypatch.setattr(llm, "is_configured", lambda: False)
+
+    upload_and_wait(
+        client,
+        files={"file": ("egress.txt", b"Exit doors shall swing in the direction of egress travel.", "text/plain")},
+    )
+    other = upload_and_wait(
+        client,
+        files={"file": ("fire.txt", b"Fire extinguishers shall be mounted near exits.", "text/plain")},
+    )
+
+    resp = client.post(
+        "/query",
+        json={"question": "exit requirements", "doc_ids": [other["doc_id"]]},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["chunks"]) == 1
+    assert body["chunks"][0]["doc_title"] == "fire.txt"
+
+
 def test_query_top_k_limits_chunk_count(client, monkeypatch):
     monkeypatch.setattr(llm, "is_configured", lambda: False)
 

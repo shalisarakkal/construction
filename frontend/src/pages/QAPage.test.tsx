@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../api";
-import type { QueryResponse } from "../types";
+import type { DocumentSummary, QueryResponse } from "../types";
 import { QAPage } from "./QAPage";
 
 vi.mock("../api");
@@ -28,6 +28,8 @@ async function askQuestion(user: ReturnType<typeof userEvent.setup>, question: s
 
 beforeEach(() => {
   vi.mocked(api.askQuestion).mockReset();
+  vi.mocked(api.listDocuments).mockReset();
+  vi.mocked(api.listDocuments).mockResolvedValue([] as DocumentSummary[]);
 });
 
 describe("QAPage", () => {
@@ -74,6 +76,37 @@ describe("QAPage", () => {
 
     expect(screen.queryByText("First answer.")).not.toBeInTheDocument();
     expect(screen.getByText(/generating answer/i)).toBeInTheDocument();
+  });
+
+  it("passes an empty doc_ids array when no documents are selected", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.askQuestion).mockResolvedValue(makeResult());
+    render(<QAPage />);
+
+    await askQuestion(user, "first question");
+
+    await waitFor(() => expect(api.askQuestion).toHaveBeenCalled());
+    expect(api.askQuestion).toHaveBeenCalledWith("first question", expect.any(Number), []);
+  });
+
+  it("passes the selected document's doc_id when scoped via DocumentScopePicker", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listDocuments).mockResolvedValue([
+      {
+        doc_id: "doc1", title: "njac_5_23_1.pdf", filename: "njac_5_23_1.pdf",
+        chunker_used: "njac", chunk_count: 12, created_at: "2026-09-03T00:00:00Z",
+        is_latest: true, supersedes_doc_id: null,
+      },
+    ] as DocumentSummary[]);
+    vi.mocked(api.askQuestion).mockResolvedValue(makeResult());
+    render(<QAPage />);
+
+    await waitFor(() => expect(screen.getByText(/njac_5_23_1\.pdf/)).toBeInTheDocument());
+    await user.click(screen.getByRole("checkbox"));
+    await askQuestion(user, "first question");
+
+    await waitFor(() => expect(api.askQuestion).toHaveBeenCalled());
+    expect(api.askQuestion).toHaveBeenCalledWith("first question", expect.any(Number), ["doc1"]);
   });
 
   it("shows an error message and clears any previous result when the query fails", async () => {
