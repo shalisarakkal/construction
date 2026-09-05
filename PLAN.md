@@ -48,8 +48,14 @@ For the full narrative/rationale behind each decision, see `docs/AllDevFlow.md`.
       confirmed working over the real network. FAISS's default path also re-verified live against
       the real 19-document/2,601-chunk dev corpus (server started, `/documents`, `/query` incl. the
       fence-question regression check, `/documents/{id}/chunks`, `/documents/{id}/versions` all
-      correct) after the 3-way refactor. **Weaviate still needs live verification** -- needs the
-      user's cluster URL + API key in `backend/.env` first. Switching the env var does **not**
+      correct) after the 3-way refactor. **Weaviate verified live end-to-end** too, against the user's
+      real Weaviate Cloud cluster (throwaway collection, deleted after) -- add/search/delete all
+      confirmed over the real network, same as Pinecone. Live verification caught a real bug on the
+      way: the collection's vector index was hardcoded to `hnsw`, but this cluster's serverless tier
+      only allows `hfresh` (rejected with a 422 on first attempt) -- fixed by switching to the
+      non-deprecated `vector_config=Configure.Vectors.self_provided(vector_index_config=Configure.
+      VectorIndex.hfresh(...))` API. All three backends (FAISS, Pinecone, Weaviate) are now verified
+      live. Switching the env var does **not**
       migrate existing vectors between backends -- deferred as **Phase 5a** (a separate
       re-embed-from-SQLite-and-re-upsert migration script; see docs/AllDevFlow.md's "Phase 5"
       section for the full reasoning).

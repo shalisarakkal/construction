@@ -1491,4 +1491,41 @@ work end-to-end against the actual service, not just against `_FakePineconeIndex
 
 **Still open**: Weaviate live verification (needs the user's cluster URL + API key) and the
 Phase 5a migration script.
+
+### Weaviate verified live -- and a real config bug found in the process
+
+The user provided a real Weaviate Cloud cluster's credentials (cluster URL, API key, plus REST/gRPC
+endpoint hostnames) directly in chat. Saved the cluster URL + API key into `backend/.env` (same
+gitignored file the Anthropic/Pinecone keys already live in) and ran the same live-verification
+treatment as Pinecone: add two vectors to a throwaway collection (`ConstructionRagVerify`, not the
+user's real corpus), search, delete one, confirm, then delete the collection.
+
+**First attempt failed with a real error**, not a bug in the verification script: Weaviate rejected
+collection creation with `422 CONFIG_NOT_ALLOWED: "hnsw is not allowed for vector_index_type.
+Allowed values: hfresh."` -- this specific Weaviate Cloud cluster's serverless tier only permits the
+newer `hfresh` vector index type, not the far-more-commonly-documented `hnsw` used in nearly every
+Weaviate tutorial (including the one this adapter was originally built against, back when it was
+still unverified against a real cluster). This is exactly the kind of gap that only live
+verification against a real account catches -- the unit tests against `_FakeWeaviateCollection`
+couldn't have caught it, since the fake never calls the real `collections.create()` at all.
+
+**Fix**: switched `_weaviate_collection()` from the deprecated `vectorizer_config=`/
+`vector_index_config=` arguments (which a DeprecationWarning during the same run had already
+flagged) to the current `vector_config=Configure.Vectors.self_provided(vector_index_config=
+Configure.VectorIndex.hfresh(distance_metric=VectorDistances.COSINE))` form, doing both fixes at
+once rather than fixing the index-type error and leaving the deprecated arguments in place.
+Documented directly in `_weaviate_collection()`'s docstring that `hfresh` is hardcoded based on
+what this one real cluster required, and that an older cluster or self-hosted instance requiring
+`hnsw` instead would need this to become configurable -- flagged as a known gap rather than
+something already handled, since there's no way to verify that case without a second real cluster.
+
+**Second attempt passed all checks live**: exact-match cosine score came back as exactly `1.0` (not
+approximately), non-match `0.0`, delete-then-reconfirm-gone worked, and the verification collection
+was deleted afterward with nothing left in the user's cluster. Re-ran the full backend suite
+afterward to confirm the `hfresh` switch didn't disturb the fake-backed unit tests (it didn't --
+they monkeypatch `_weaviate_collection()` entirely, so they never touch this code path). Backend
+tests: still 107 passed.
+
+All three vector-store backends (FAISS, Pinecone, Weaviate) are now verified against real,
+non-fake systems. Only the Phase 5a migration script remains unbuilt.
 <!-- todo -->

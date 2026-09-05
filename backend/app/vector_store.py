@@ -136,12 +136,22 @@ def _weaviate_collection():
     directly, same seam pattern as _pinecone_index()/llm.py's
     _anthropic_chat/_ollama_chat.
 
-    vectorizer_config=none because we supply our own vectors (same reason
-    as Pinecone's plain index -- no built-in text vectorizer module is
-    involved). chunk_id is stored as a property (in addition to being
-    hashed into the object's UUID via generate_uuid5) purely so a query
-    result can be read back to its chunk_id directly, without needing a
-    reverse UUID lookup."""
+    Vector index type is `hfresh`, not the more commonly-documented `hnsw`
+    -- discovered live against a real Weaviate Cloud cluster created
+    2026-09-04, which rejected `hnsw` outright (422 CONFIG_NOT_ALLOWED:
+    "hnsw is not allowed for vector_index_type. Allowed values: hfresh.").
+    Newer Weaviate Cloud serverless clusters apparently only allow `hfresh`
+    now; if this ever needs to run against an older cluster or self-hosted
+    instance that only supports `hnsw`, that'll need to become configurable
+    rather than hardcoded. Uses the current non-deprecated `vector_config`
+    argument (the older separate `vectorizer_config`/`vector_index_config`
+    arguments still work but log a DeprecationWarning as of client v4.23).
+
+    We supply our own vectors (same reason as Pinecone's plain index -- no
+    built-in text vectorizer module is involved). chunk_id is stored as a
+    property (in addition to being hashed into the object's UUID via
+    generate_uuid5) purely so a query result can be read back to its
+    chunk_id directly, without needing a reverse UUID lookup."""
     global _weaviate_collection_handle
     if _weaviate_collection_handle is not None:
         return _weaviate_collection_handle
@@ -158,8 +168,9 @@ def _weaviate_collection():
         client.collections.create(
             name=settings.weaviate_collection_name,
             properties=[Property(name="chunk_id", data_type=DataType.TEXT)],
-            vectorizer_config=Configure.Vectorizer.none(),
-            vector_index_config=Configure.VectorIndex.hnsw(distance_metric=VectorDistances.COSINE),
+            vector_config=Configure.Vectors.self_provided(
+                vector_index_config=Configure.VectorIndex.hfresh(distance_metric=VectorDistances.COSINE)
+            ),
         )
     _weaviate_collection_handle = client.collections.get(settings.weaviate_collection_name)
     return _weaviate_collection_handle
